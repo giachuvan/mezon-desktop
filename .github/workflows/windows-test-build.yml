@@ -10,19 +10,19 @@ permissions:
   contents: read
 
 env:
-  NX_CHAT_APP_API_HOST: dev-mezon.nccsoft.vn
-  NX_CHAT_APP_API_PORT: "8088"
-  NX_CHAT_APP_API_SECURE: "false"
-  NX_CHAT_APP_API_KEY: defaultkey
-  NX_CHAT_APP_API_GW_HOST: dev-mezon.nccsoft.vn
-  NX_CHAT_APP_API_GW_PORT: "8088"
-  NX_CHAT_APP_TCP_PORT: "7349"
-  NX_CHAT_APP_STREAM_WS_URL: wss://stn.nccsoft.vn
-  NX_CHAT_APP_MEET_WS_URL: wss://meet.nccsoft.vn
+  NX_CHAT_APP_API_HOST: api.mezon.ai
+  NX_CHAT_APP_API_PORT: "443"
+  NX_CHAT_APP_API_SECURE: "true"
+  NX_CHAT_APP_API_KEY: HTTP3m3zonPr0dkey
+  NX_CHAT_APP_API_GW_HOST: gw.mezon.ai
+  NX_CHAT_APP_API_GW_PORT: "443"
+  NX_CHAT_APP_TCP_PORT: ""
+  NX_CHAT_APP_STREAM_WS_URL: wss://stn.mezon.ai
+  NX_CHAT_APP_MEET_WS_URL: wss://meet.mezon.ai
   NX_CHAT_APP_NOTIFICATION_WS_URL: wss://gotify.mezon.ai
   NX_CHAT_APP_OAUTH2_AUTHORIZE_URL: https://oauth2.mezon.ai/oauth2/auth
-  NX_CHAT_APP_OAUTH2_CLIENT_ID: f049f29e-12a9-464c-938f-0a2f60c3210b
-  NX_CHAT_APP_OAUTH2_REDIRECT_URI: https://mezon.ai/login/callback
+  NX_CHAT_APP_OAUTH2_CLIENT_ID: 25f63a1f-16b8-488b-8b14-68520eeab77f
+  NX_CHAT_APP_OAUTH2_REDIRECT_URI: http://127.0.0.1:4200/login/callback
   NX_CHAT_APP_OAUTH2_RESPONSE_TYPE: code
   NX_CHAT_APP_OAUTH2_SCOPE: openid+offline
   NX_CHAT_APP_OAUTH2_CODE_CHALLENGE_METHOD: S256
@@ -35,9 +35,9 @@ env:
   NX_BASE_IMG_URL: https://cdn.komu.vn
   NX_UPLOAD_IMG_URL: https://cdn-api.mezon.ai
   NX_PROFILE_IMG_URL: https://profile.mezon.ai
-  NX_IMGPROXY_BASE_URL: https://dev-imgproxy.nccsoft.vn
-  NX_IMGPROXY_KEY: ${{ secrets.NX_IMGPROXY_KEY }}
-  NX_CHAT_APP_API_KLIPY_KEY: ${{ secrets.NX_CHAT_APP_API_KLIPY_KEY }}
+  NX_IMGPROXY_BASE_URL: https://imgproxy.komu.vn
+  NX_IMGPROXY_KEY: K0YUZRIosDOcz5lY6qrgC6UIXmQgWzLjZv7VJ1RAA8c
+  NX_CHAT_APP_API_KLIPY_KEY: j8Mh0W38PmhdHoX7mQYJ0VSwkHNMJZ9tkPeeZuz3hukOcAxueqUjOuTpiJdrar6p
   NX_CHAT_APP_API_KLIPY_URL: https://api.klipy.com/api/v1
   NX_CHAT_APP_MEZON_TREASURY_URL: https://withdraw-api.nccsoft.vn
   NX_CHAT_APP_API_MEZONTREASURY_KEY: ${{ secrets.NX_CHAT_APP_API_MEZONTREASURY_KEY }}
@@ -62,7 +62,7 @@ env:
   NX_CHAT_SENTRY_DSN: ${{ secrets.NX_CHAT_SENTRY_DSN }}
   NX_CHAT_APP_ANNONYMOUS_USER_ID: "1767478432163172999"
   NX_MAX_LENGTH_NAME_ALLOWED: "64"
-  NX_UPDATE_URL: ${{ secrets.NX_UPDATE_URL }}
+  NX_UPDATE_URL: https://cdn.komu.vn/release/
 
 jobs:
   windows:
