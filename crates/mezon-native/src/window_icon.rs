@@ -55,14 +55,14 @@ fn try_apply_dpi_aware_icons(hwnd: isize) -> windows::core::Result<()> {
         SendMessageW(
             hwnd,
             WM_SETICON,
-            WPARAM(ICON_BIG as usize),
-            LPARAM(big_icon.0 as isize),
+            Some(WPARAM(ICON_BIG as usize)),
+            Some(LPARAM(big_icon.0 as isize)),
         );
         SendMessageW(
             hwnd,
             WM_SETICON,
-            WPARAM(ICON_SMALL as usize),
-            LPARAM(small_icon.0 as isize),
+            Some(WPARAM(ICON_SMALL as usize)),
+            Some(LPARAM(small_icon.0 as isize)),
         );
     }
 
