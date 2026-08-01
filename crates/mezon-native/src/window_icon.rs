@@ -50,7 +50,7 @@ fn load_app_icon(
     cx: i32,
     cy: i32,
 ) -> windows::core::Result<windows::Win32::UI::WindowsAndMessaging::HICON> {
-    use windows::Win32::UI::WindowsAndMessaging::{IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW};
+    use windows::Win32::UI::WindowsAndMessaging::{HICON, IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW};
 
     let flags = LR_DEFAULTCOLOR.0;
     if let Some(load) = load_icon_with_scale_down_fn() {
@@ -69,6 +69,7 @@ fn load_app_icon(
             cy,
             LR_DEFAULTCOLOR,
         )
+        .map(|handle| HICON(handle.0))
     }
 }
 
