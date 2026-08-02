@@ -1,10 +1,30 @@
 use gpui::{
-    AnyWindowHandle, App, AppContext, Bounds, DisplayId, Global, Pixels, Window, WindowBounds,
-    WindowHandle, WindowKind, px, size,
+    AnyWindowHandle, App, AppContext, Bounds, DisplayId, Entity, Global, Pixels, Window,
+    WindowBounds, WindowHandle, WindowKind, px, size,
 };
+use mezon_store::Settings;
+
+pub const BASE_REM_SIZE: f32 = 16.0;
+const MIN_ZOOM_FACTOR: f32 = 0.8;
+const MAX_ZOOM_FACTOR: f32 = 1.5;
 
 struct MainWindowHandle(AnyWindowHandle);
 impl Global for MainWindowHandle {}
+
+pub fn apply_ui_zoom(window: &mut Window, zoom_factor: f32) {
+    let zoom = zoom_factor.clamp(MIN_ZOOM_FACTOR, MAX_ZOOM_FACTOR);
+    window.set_rem_size(px(BASE_REM_SIZE * zoom));
+}
+
+pub fn install_ui_zoom_observer(settings: Entity<Settings>, window: &mut Window, cx: &mut App) {
+    apply_ui_zoom(window, settings.read(cx).zoom_factor);
+    let handle = window.window_handle();
+    cx.observe(&settings, move |settings, cx| {
+        let zoom = settings.read(cx).zoom_factor;
+        let _ = handle.update(cx, |_, window, _| apply_ui_zoom(window, zoom));
+    })
+    .detach();
+}
 
 pub fn register_main_window(handle: AnyWindowHandle, cx: &mut App) {
     if cx.try_global::<MainWindowHandle>().is_some() {
@@ -134,4 +154,16 @@ pub fn sync_overlay_to_main<W: 'static>(
     let _ = overlay.update(cx, |_, window, _| {
         apply_overlay_bounds(window, main_bounds);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BASE_REM_SIZE, MAX_ZOOM_FACTOR, MIN_ZOOM_FACTOR};
+
+    #[test]
+    fn zoom_factor_bounds_match_settings_schema() {
+        assert_eq!(MIN_ZOOM_FACTOR, 0.8);
+        assert_eq!(MAX_ZOOM_FACTOR, 1.5);
+        assert_eq!(BASE_REM_SIZE, 16.0);
+    }
 }

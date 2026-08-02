@@ -56,6 +56,7 @@ fn configure_linux_session() {
     if std::env::var_os("DISPLAY").is_none() {
         return;
     }
+    ensure_linux_ui_scale_factor();
     if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|display| !display.is_empty()) {
         mezon_store::record_wayland_session();
     }
@@ -74,6 +75,164 @@ fn configure_linux_session() {
         }
     }
     ensure_fcitx_xim_on_the_spot();
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_linux_ui_scale_factor() {
+    if std::env::var_os("GPUI_X11_SCALE_FACTOR").is_some() {
+        return;
+    }
+    if let Some(scale) = linux_desktop_ui_scale() {
+        unsafe {
+            std::env::set_var("GPUI_X11_SCALE_FACTOR", format!("{scale}"));
+        }
+        tracing::info!("Set GPUI_X11_SCALE_FACTOR={scale} from desktop UI scale");
+        return;
+    }
+    unsafe {
+        std::env::set_var("GPUI_X11_SCALE_FACTOR", "1");
+    }
+    tracing::info!(
+        "Set GPUI_X11_SCALE_FACTOR=1 (no desktop scale detected; avoids RandR over-scaling on 1080p)"
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn linux_desktop_ui_scale() -> Option<f32> {
+    for key in ["GDK_SCALE", "ELM_SCALE"] {
+        if let Ok(value) = std::env::var(key)
+            && let Ok(scale) = value.parse::<f32>()
+            && scale.is_finite()
+            && scale > 0.0
+        {
+            return Some(scale);
+        }
+    }
+    if let Some(scale) = read_xfce_ui_scale() {
+        return Some(scale);
+    }
+    read_xft_dpi_scale()
+}
+
+#[cfg(target_os = "linux")]
+fn read_xfce_ui_scale() -> Option<f32> {
+    if let Some(scale) = xfconf_query_scale("displays", "/Displays/Active/Scale") {
+        return Some(scale);
+    }
+    if let Some(dpi) = xfconf_query_i32("xsettings", "/Xft/DPI")
+        && dpi > 0
+    {
+        return Some(dpi as f32 / 96.0);
+    }
+    read_xfce_ui_scale_from_config()
+}
+
+#[cfg(target_os = "linux")]
+fn xfconf_query_scale(channel: &str, property: &str) -> Option<f32> {
+    let output = std::process::Command::new("xfconf-query")
+        .args(["-c", channel, "-p", property])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_ui_scale_value(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(target_os = "linux")]
+fn xfconf_query_i32(channel: &str, property: &str) -> Option<i32> {
+    let output = std::process::Command::new("xfconf-query")
+        .args(["-c", channel, "-p", property])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+#[cfg(target_os = "linux")]
+fn read_xfce_ui_scale_from_config() -> Option<f32> {
+    let home = std::env::var_os("HOME")?;
+    let xfconf_dir =
+        std::path::PathBuf::from(home).join(".config/xfce4/xfconf/xfce-perchannel-xml");
+    let displays = std::fs::read_to_string(xfconf_dir.join("displays.xml")).ok()?;
+    if let Some(scale) = parse_xfce_active_scale(&displays) {
+        return Some(scale);
+    }
+    let xsettings = std::fs::read_to_string(xfconf_dir.join("xsettings.xml")).ok()?;
+    parse_xfce_xft_dpi_scale(&xsettings)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_ui_scale_value(raw: &str) -> Option<f32> {
+    let scale: f32 = raw.trim().parse().ok()?;
+    if scale.is_finite() && scale > 0.0 {
+        Some(scale)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_xfce_active_scale(displays_xml: &str) -> Option<f32> {
+    let active_start = displays_xml.find(r#"<property name="Active""#)?;
+    let active_section = &displays_xml[active_start..];
+    parse_xfconf_double_property(active_section, "Scale")
+}
+
+#[cfg(target_os = "linux")]
+fn parse_xfce_xft_dpi_scale(xsettings_xml: &str) -> Option<f32> {
+    let dpi = parse_xfconf_int_property(xsettings_xml, "DPI")?;
+    if dpi > 0 {
+        Some(dpi as f32 / 96.0)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_xfconf_double_property(section: &str, name: &str) -> Option<f32> {
+    let needle = format!(r#"name="{name}" type="double" value=""#);
+    let start = section.find(&needle)?;
+    let rest = &section[start + needle.len()..];
+    let end = rest.find('"')?;
+    parse_ui_scale_value(&rest[..end])
+}
+
+#[cfg(target_os = "linux")]
+fn parse_xfconf_int_property(section: &str, name: &str) -> Option<i32> {
+    let needle = format!(r#"name="{name}" type="int" value=""#);
+    let start = section.find(&needle)?;
+    let rest = &section[start + needle.len()..];
+    let end = rest.find('"')?;
+    rest[..end].trim().parse().ok()
+}
+
+#[cfg(target_os = "linux")]
+fn read_xft_dpi_scale() -> Option<f32> {
+    let output = std::process::Command::new("xrdb")
+        .arg("-query")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_xft_dpi_scale(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(target_os = "linux")]
+fn parse_xft_dpi_scale(xrdb_output: &str) -> Option<f32> {
+    for line in xrdb_output.lines() {
+        let line = line.trim();
+        if let Some(dpi) = line.strip_prefix("Xft.dpi:") {
+            let dpi: f32 = dpi.split_whitespace().next()?.parse().ok()?;
+            if dpi.is_finite() && dpi > 0.0 {
+                return Some(dpi / 96.0);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -952,8 +1111,10 @@ fn open_main_window(
     );
 
     let root_auth_state = auth_state.clone();
+    let settings_for_zoom = settings_entity.clone();
     let window_handle = cx
-        .open_window(options, move |_window, cx| {
+        .open_window(options, move |window, cx| {
+            mezon_ui::app::main_window::install_ui_zoom_observer(settings_for_zoom, window, cx);
             cx.new(|cx| RootView::new(title_bar, root_auth_state, settings_entity, cx))
         })
         .unwrap_or_else(|e| {
@@ -1256,5 +1417,65 @@ mod tests {
     fn badge_total_saturates_instead_of_overflowing() {
         let dms = [(10u32, false)];
         assert_eq!(badge_total(u32::MAX, dms.into_iter(), 5), u32::MAX);
+    }
+
+    #[cfg(target_os = "linux")]
+    mod linux_scale {
+        use super::super::{
+            parse_ui_scale_value, parse_xfce_active_scale, parse_xfce_xft_dpi_scale,
+            parse_xft_dpi_scale,
+        };
+
+        #[test]
+        fn xft_dpi_96_maps_to_unity_scale() {
+            let output = "Xft.dpi:\t96\n";
+            assert_eq!(parse_xft_dpi_scale(output), Some(1.0));
+        }
+
+        #[test]
+        fn xft_dpi_120_maps_to_125_scale() {
+            let output = "Xft.dpi: 120\n";
+            assert_eq!(parse_xft_dpi_scale(output), Some(1.25));
+        }
+
+        #[test]
+        fn missing_xft_dpi_returns_none() {
+            assert_eq!(parse_xft_dpi_scale("Xft.antialias: 1\n"), None);
+        }
+
+        #[test]
+        fn xfce_active_scale_1x_from_displays_xml() {
+            let xml = r#"
+                <property name="Active" type="empty">
+                    <property name="Scale" type="double" value="1"/>
+                </property>
+            "#;
+            assert_eq!(parse_xfce_active_scale(xml), Some(1.0));
+        }
+
+        #[test]
+        fn xfce_active_scale_125_from_displays_xml() {
+            let xml = r#"
+                <property name="Active" type="empty">
+                    <property name="Scale" type="double" value="1.25"/>
+                </property>
+            "#;
+            assert_eq!(parse_xfce_active_scale(xml), Some(1.25));
+        }
+
+        #[test]
+        fn xfce_xft_dpi_96_from_xsettings_xml() {
+            let xml = r#"
+                <property name="Xft" type="empty">
+                    <property name="DPI" type="int" value="96"/>
+                </property>
+            "#;
+            assert_eq!(parse_xfce_xft_dpi_scale(xml), Some(1.0));
+        }
+
+        #[test]
+        fn xfconf_scale_value_parses_trailing_zeros() {
+            assert_eq!(parse_ui_scale_value("1.000000"), Some(1.0));
+        }
     }
 }
