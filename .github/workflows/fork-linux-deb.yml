@@ -1,7 +1,7 @@
 name: Fork Linux .deb
 
 # Build a tester-ready .deb on Ubuntu 22.04 (glibc 2.35) from any fork branch.
-# No org secrets required — uses public API defaults.
+# NX_* env block mirrors local .env (fork-only — do not merge to upstream).
 #
 # Usage:
 #   1. Push your branch to your fork
@@ -32,7 +32,7 @@ env:
   NX_CHAT_APP_API_HOST: api.mezon.ai
   NX_CHAT_APP_API_PORT: "443"
   NX_CHAT_APP_API_SECURE: "true"
-  NX_CHAT_APP_API_KEY: ""
+  NX_CHAT_APP_API_KEY: HTTP3m3zonPr0dkey
   NX_CHAT_APP_API_GW_HOST: gw.mezon.ai
   NX_CHAT_APP_API_GW_PORT: "443"
   NX_CHAT_APP_TCP_PORT: ""
@@ -40,8 +40,8 @@ env:
   NX_CHAT_APP_MEET_WS_URL: wss://meet.mezon.ai
   NX_CHAT_APP_NOTIFICATION_WS_URL: wss://gotify.mezon.ai
   NX_CHAT_APP_OAUTH2_AUTHORIZE_URL: https://oauth2.mezon.ai/oauth2/auth
-  NX_CHAT_APP_OAUTH2_CLIENT_ID: f049f29e-12a9-464c-938f-0a2f60c3210b
-  NX_CHAT_APP_OAUTH2_REDIRECT_URI: https://mezon.ai/login/callback
+  NX_CHAT_APP_OAUTH2_CLIENT_ID: 25f63a1f-16b8-488b-8b14-68520eeab77f
+  NX_CHAT_APP_OAUTH2_REDIRECT_URI: http://127.0.0.1:4200/login/callback
   NX_CHAT_APP_OAUTH2_RESPONSE_TYPE: code
   NX_CHAT_APP_OAUTH2_SCOPE: openid+offline
   NX_CHAT_APP_OAUTH2_CODE_CHALLENGE_METHOD: S256
@@ -55,7 +55,9 @@ env:
   NX_UPLOAD_IMG_URL: https://cdn-api.mezon.ai
   NX_PROFILE_IMG_URL: https://profile.mezon.ai
   NX_IMGPROXY_BASE_URL: https://imgproxy.komu.vn
-  NX_IMGPROXY_KEY: ""
+  NX_IMGPROXY_KEY: K0YUZRIosDOcz5lY6qrgC6UIXmQgWzLjZv7VJ1RAA8c
+  NX_UPDATE_URL: https://cdn.komu.vn/release/
+  NX_CHAT_APP_API_KLIPY_KEY: j8Mh0W38PmhdHoX7mQYJ0VSwkHNMJZ9tkPeeZuz3hukOcAxueqUjOuTpiJdrar6p
   NX_CHAT_APP_API_KLIPY_URL: https://api.klipy.com/api/v1
   NX_CHAT_APP_MEZON_TREASURY_URL: https://withdraw-api.nccsoft.vn
   NX_CHAT_APP_CONTRACT_ADDRESS: "0x4F17a94dD6E1B2D6241C4D1956C6c7a07ba2Ec50"
