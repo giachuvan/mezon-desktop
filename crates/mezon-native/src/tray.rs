@@ -93,6 +93,23 @@ fn fallback_pixels() -> TrayPixels {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn resize_tray_pixels(pixels: TrayPixels, size: u32) -> TrayPixels {
+    if pixels.width == size && pixels.height == size {
+        return pixels;
+    }
+    let Some(img) = image::RgbaImage::from_raw(pixels.width, pixels.height, pixels.rgba) else {
+        return pixels;
+    };
+    let resized = image::imageops::resize(&img, size, size, image::imageops::FilterType::Lanczos3);
+    let (width, height) = resized.dimensions();
+    TrayPixels {
+        rgba: resized.into_raw(),
+        width,
+        height,
+    }
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod sni {
     use super::{TrayPixels, tray_pixels};
@@ -309,7 +326,18 @@ mod desktop {
     }
 
     fn build_tray_icon() -> tray_icon::Icon {
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(icon) = tray_icon::Icon::from_resource(1, None) {
+                return icon;
+            }
+            tracing::warn!("Failed to load tray icon from embedded app.ico resource");
+        }
+
         let pixels = tray_pixels();
+        #[cfg(target_os = "windows")]
+        let pixels = super::resize_tray_pixels(pixels, 32);
+
         match tray_icon::Icon::from_rgba(pixels.rgba, pixels.width, pixels.height) {
             Ok(icon) => icon,
             Err(e) => {
