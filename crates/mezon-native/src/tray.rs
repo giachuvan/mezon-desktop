@@ -98,8 +98,19 @@ fn resize_tray_pixels(pixels: TrayPixels, size: u32) -> TrayPixels {
     if pixels.width == size && pixels.height == size {
         return pixels;
     }
-    let Some(img) = image::RgbaImage::from_raw(pixels.width, pixels.height, pixels.rgba) else {
+    let expected_len = (pixels.width as usize)
+        .saturating_mul(pixels.height as usize)
+        .saturating_mul(4);
+    if pixels.rgba.len() != expected_len {
         return pixels;
+    }
+    let TrayPixels {
+        rgba,
+        width,
+        height,
+    } = pixels;
+    let Some(img) = image::RgbaImage::from_raw(width, height, rgba) else {
+        return fallback_pixels();
     };
     let resized = image::imageops::resize(&img, size, size, image::imageops::FilterType::Lanczos3);
     let (width, height) = resized.dimensions();
