@@ -93,34 +93,6 @@ fn fallback_pixels() -> TrayPixels {
     }
 }
 
-#[cfg(target_os = "windows")]
-fn resize_tray_pixels(pixels: TrayPixels, size: u32) -> TrayPixels {
-    if pixels.width == size && pixels.height == size {
-        return pixels;
-    }
-    let expected_len = (pixels.width as usize)
-        .saturating_mul(pixels.height as usize)
-        .saturating_mul(4);
-    if pixels.rgba.len() != expected_len {
-        return pixels;
-    }
-    let TrayPixels {
-        rgba,
-        width,
-        height,
-    } = pixels;
-    let Some(img) = image::RgbaImage::from_raw(width, height, rgba) else {
-        return fallback_pixels();
-    };
-    let resized = image::imageops::resize(&img, size, size, image::imageops::FilterType::Lanczos3);
-    let (width, height) = resized.dimensions();
-    TrayPixels {
-        rgba: resized.into_raw(),
-        width,
-        height,
-    }
-}
-
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod sni {
     use super::{TrayPixels, tray_pixels};
@@ -339,16 +311,13 @@ mod desktop {
     fn build_tray_icon() -> tray_icon::Icon {
         #[cfg(target_os = "windows")]
         {
-            if let Ok(icon) = tray_icon::Icon::from_resource(1, None) {
-                return icon;
+            if let Ok(handle) = crate::window_icon::load_tray_icon_handle() {
+                return tray_icon::Icon::from_handle(handle.0 as isize);
             }
             tracing::warn!("Failed to load tray icon from embedded app.ico resource");
         }
 
         let pixels = tray_pixels();
-        #[cfg(target_os = "windows")]
-        let pixels = super::resize_tray_pixels(pixels, 32);
-
         match tray_icon::Icon::from_rgba(pixels.rgba, pixels.width, pixels.height) {
             Ok(icon) => icon,
             Err(e) => {

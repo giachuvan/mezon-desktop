@@ -45,6 +45,30 @@ fn load_icon_with_scale_down_fn() -> Option<LoadIconWithScaleDownFn> {
 }
 
 #[cfg(target_os = "windows")]
+pub(crate) fn load_tray_icon_handle()
+-> windows::core::Result<windows::Win32::UI::WindowsAndMessaging::HICON> {
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi};
+    use windows::Win32::UI::WindowsAndMessaging::{SM_CXSMICON, SM_CYSMICON};
+
+    let dpi = unsafe { GetDpiForSystem() };
+    if dpi == 0 {
+        return Err(invalid_arg("GetDpiForSystem returned 0"));
+    }
+
+    let width = unsafe { GetSystemMetricsForDpi(SM_CXSMICON, dpi) };
+    let height = unsafe { GetSystemMetricsForDpi(SM_CYSMICON, dpi) };
+    if width <= 0 || height <= 0 {
+        return Err(invalid_arg(
+            "GetSystemMetricsForDpi returned non-positive tray icon size",
+        ));
+    }
+
+    let module = unsafe { GetModuleHandleW(None)? };
+    load_app_icon(module.into(), width, height)
+}
+
+#[cfg(target_os = "windows")]
 fn load_app_icon(
     module: windows::Win32::Foundation::HINSTANCE,
     cx: i32,
