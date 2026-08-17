@@ -2708,6 +2708,7 @@ impl Window {
             self.focus_listeners
                 .clone()
                 .retain(&(), |listener| listener(&event, self, cx));
+            self.invalidate_character_coordinates();
         }
 
         debug_assert!(self.rendered_entity_stack.is_empty());

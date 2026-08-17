@@ -5,10 +5,11 @@ use super::blink_manager::{CaretBlink, HasCaretBlink};
 use gpui::{
     App, Bounds, ClipboardItem, Context, Corners, CursorStyle, Div, Element, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, RenderOnce,
-    ShapedLine, SharedString, Style, StyleRefinement, Styled, TextAlign, TextRun, UTF16Selection,
-    UnderlineStyle, Window, WrappedLine, div, fill, point, prelude::*, px, size, svg,
+    FontWeight, GlobalElementId, Hsla, ImeSurroundingText, InspectorElementId, IntoElement,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    Render, RenderOnce, ShapedLine, SharedString, Style, StyleRefinement, Styled, TextAlign,
+    TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, div, fill, point, prelude::*, px,
+    size, svg,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -25,7 +26,7 @@ use crate::text_actions::{
 use crate::text_edit::{
     EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
     granularity_for_click, home_target, line_end, line_start, next_word_boundary,
-    previous_word_boundary, range_for_granularity, should_coalesce,
+    previous_word_boundary, range_for_granularity, should_coalesce, surrounding_delete_range,
 };
 
 const MASK: char = '\u{2022}';
@@ -1125,6 +1126,51 @@ impl EntityInputHandler for InputState {
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
         Some(self.offset_to_utf16(self.index_for_mouse_position(point)))
+    }
+
+    fn surrounding_text(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<ImeSurroundingText> {
+        let caret = if self.selection_reversed {
+            self.selected_range.start
+        } else {
+            self.selected_range.end
+        };
+        let anchor = if self.selection_reversed {
+            self.selected_range.end
+        } else {
+            self.selected_range.start
+        };
+        Some(ImeSurroundingText::from_document(
+            &self.content,
+            caret,
+            anchor,
+            self.marked_range.clone(),
+        ))
+    }
+
+    fn delete_surrounding_text(
+        &mut self,
+        before_len: usize,
+        after_len: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = surrounding_delete_range(
+            &self.content,
+            &self.selected_range,
+            self.marked_range.as_ref(),
+            self.selection_reversed,
+            before_len,
+            after_len,
+        );
+        if range.is_empty() {
+            return;
+        }
+        let range_utf16 = self.range_to_utf16(&range);
+        self.replace_text_in_range(Some(range_utf16), "", window, cx);
     }
 }
 

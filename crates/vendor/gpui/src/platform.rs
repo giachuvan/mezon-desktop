@@ -1374,6 +1374,120 @@ impl PlatformInputHandler {
             .update(|window, cx| self.handler.prefers_ime_for_printable_keys(window, cx))
             .unwrap_or(false)
     }
+
+    #[allow(dead_code)]
+    pub fn surrounding_text(&mut self) -> Option<ImeSurroundingText> {
+        self.cx
+            .update(|window, cx| self.handler.surrounding_text(window, cx))
+            .ok()
+            .flatten()
+    }
+
+    #[allow(dead_code)]
+    pub fn delete_surrounding_text(&mut self, before_len: usize, after_len: usize) {
+        self.cx
+            .update(|window, cx| {
+                self.handler
+                    .delete_surrounding_text(before_len, after_len, window, cx);
+            })
+            .ok();
+    }
+}
+
+/// Plain text around the caret for Linux IME (`zwp_text_input_v3.set_surrounding_text`).
+///
+/// `cursor` and `anchor` are UTF-8 byte offsets into `text`. The string excludes any
+/// active preedit and is capped at [`ImeSurroundingText::MAX_LEN`] on a character boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImeSurroundingText {
+    /// Surrounding document text sent to the IME.
+    pub text: String,
+    /// Caret offset in UTF-8 bytes.
+    pub cursor: usize,
+    /// Selection anchor offset in UTF-8 bytes. Equal to `cursor` when there is no selection.
+    pub anchor: usize,
+}
+
+impl ImeSurroundingText {
+    /// Wayland text-input-v3 surrounding-text size limit.
+    pub const MAX_LEN: usize = 4000;
+
+    /// Build a surrounding-text window from a UTF-8 document.
+    ///
+    /// `exclude` is a preedit range in the document that must not be sent to the IME.
+    pub fn from_document(
+        document: &str,
+        cursor: usize,
+        anchor: usize,
+        exclude: Option<Range<usize>>,
+    ) -> Self {
+        let cursor = cursor.min(document.len());
+        let anchor = anchor.min(document.len());
+        let (text, cursor, anchor) = if let Some(exclude) = exclude.filter(|range| {
+            range.start <= range.end
+                && range.end <= document.len()
+                && document.is_char_boundary(range.start)
+                && document.is_char_boundary(range.end)
+        }) {
+            let removed = exclude.end - exclude.start;
+            if removed == 0 {
+                (document.to_owned(), cursor, anchor)
+            } else {
+                let mut text = String::with_capacity(document.len() - removed);
+                text.push_str(&document[..exclude.start]);
+                text.push_str(&document[exclude.end..]);
+                let map = |offset: usize| {
+                    if offset >= exclude.end {
+                        offset - removed
+                    } else if offset > exclude.start {
+                        exclude.start
+                    } else {
+                        offset
+                    }
+                };
+                (text, map(cursor), map(anchor))
+            }
+        } else {
+            (document.to_owned(), cursor, anchor)
+        };
+        Self::window(text, cursor, anchor)
+    }
+
+    fn window(text: String, cursor: usize, anchor: usize) -> Self {
+        let cursor = cursor.min(text.len());
+        let anchor = anchor.min(text.len());
+        if text.len() <= Self::MAX_LEN {
+            return Self {
+                text,
+                cursor,
+                anchor,
+            };
+        }
+        let half = Self::MAX_LEN / 2;
+        let mut start = cursor.saturating_sub(half);
+        while start > 0 && !text.is_char_boundary(start) {
+            start -= 1;
+        }
+        let mut end = start.saturating_add(Self::MAX_LEN).min(text.len());
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end - start < Self::MAX_LEN && start > 0 {
+            let extra = Self::MAX_LEN - (end - start);
+            let mut new_start = start.saturating_sub(extra);
+            while new_start > 0 && !text.is_char_boundary(new_start) {
+                new_start -= 1;
+            }
+            start = new_start;
+        }
+        let cursor = cursor.saturating_sub(start).min(end - start);
+        let anchor = anchor.saturating_sub(start).min(end - start);
+        Self {
+            text: text[start..end].to_owned(),
+            cursor,
+            anchor,
+        }
+    }
 }
 
 /// A struct representing a selection in a text buffer, in UTF16 characters.
@@ -1498,6 +1612,28 @@ pub trait InputHandler: 'static {
     /// The terminal keeps the default `false` so that raw keys reach the terminal process.
     fn prefers_ime_for_printable_keys(&mut self, _window: &mut Window, _cx: &mut App) -> bool {
         false
+    }
+
+    /// UTF-8 text around the caret for IME engines that rewrite already-committed
+    /// characters (Vietnamese Telex/VNI free-style, some CJK).
+    fn surrounding_text(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<ImeSurroundingText> {
+        None
+    }
+
+    /// Delete `before_len` UTF-8 bytes before and `after_len` bytes after the
+    /// caret (or around the preedit / selection). Offsets that land inside a
+    /// character are snapped to a character boundary.
+    fn delete_surrounding_text(
+        &mut self,
+        _before_len: usize,
+        _after_len: usize,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) {
     }
 }
 
@@ -2557,5 +2693,21 @@ mod tests {
     #[test]
     fn test_window_button_layout_parse_all_invalid() {
         assert!(WindowButtonLayout::parse("asdfghjkl").is_err());
+    }
+
+    #[test]
+    fn ime_surrounding_excludes_preedit_and_maps_cursor() {
+        let surrounding = ImeSurroundingText::from_document("hoas", 4, 4, Some(3..4));
+        assert_eq!(surrounding.text, "hoa");
+        assert_eq!(surrounding.cursor, 3);
+        assert_eq!(surrounding.anchor, 3);
+    }
+
+    #[test]
+    fn ime_surrounding_keeps_vietnamese_bytes() {
+        let text = "hóa";
+        let surrounding = ImeSurroundingText::from_document(text, text.len(), text.len(), None);
+        assert_eq!(surrounding.text, text);
+        assert_eq!(surrounding.cursor, text.len());
     }
 }

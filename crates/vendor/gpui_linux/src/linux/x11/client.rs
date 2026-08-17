@@ -78,12 +78,15 @@ pub(crate) const XINPUT_ALL_DEVICE_GROUPS: xinput::DeviceId = 1;
 
 const GPUI_X11_SCALE_FACTOR_ENV: &str = "GPUI_X11_SCALE_FACTOR";
 
+fn scaled_to_i16(value: gpui::ScaledPixels) -> i16 {
+    value.0.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
+}
 
 fn xim_preedit_geometry(bounds: Bounds<gpui::ScaledPixels>) -> (xim::Point, xim::Rectangle) {
     let width = bounds.size.width.0.max(1.);
     let height = bounds.size.height.0.max(1.);
-    let x = u32::from(bounds.origin.x) as i16;
-    let y = u32::from(bounds.origin.y) as i16;
+    let x = scaled_to_i16(bounds.origin.x);
+    let y = scaled_to_i16(bounds.origin.y);
     (
         xim::Point {
             x,
@@ -92,8 +95,8 @@ fn xim_preedit_geometry(bounds: Bounds<gpui::ScaledPixels>) -> (xim::Point, xim:
         xim::Rectangle {
             x,
             y,
-            width: width as u16,
-            height: height as u16,
+            width: width.min(u16::MAX as f32) as u16,
+            height: height.min(u16::MAX as f32) as u16,
         },
     )
 }
@@ -282,7 +285,7 @@ impl X11ClientStatePtr {
             return;
         };
         let mut state = client.0.borrow_mut();
-        if state.composing || state.ximc.is_none() {
+        if state.ximc.is_none() {
             return;
         }
 
@@ -660,7 +663,9 @@ impl X11Client {
                                     )
                                 };
                                 let len = events.len();
-                                if len >= 2 && same_run(&events[len - 1]) && same_run(&events[len - 2])
+                                if len >= 2
+                                    && same_run(&events[len - 1])
+                                    && same_run(&events[len - 2])
                                 {
                                     events[len - 1] = Event::XinputMotion(motion);
                                 } else {
@@ -719,17 +724,42 @@ impl X11Client {
                     continue;
                 };
                 let xim_connected = xim_handler.connected;
+                if let Event::KeyPress(key_event) = &event {
+                    let keystroke = keystroke_from_xkb(
+                        &state.xkb,
+                        state.modifiers,
+                        key_event.detail.into(),
+                    );
+                    state.pre_key_char_down = Some(keystroke.clone());
+                    xim_handler.pending_key = keystroke.key_char.as_deref().and_then(|s| {
+                        let mut chars = s.chars();
+                        let ch = chars.next()?;
+                        chars.next().is_none().then_some(ch)
+                    });
+                    if state.composing
+                        && matches!(keystroke.key.as_str(), "backspace" | "delete")
+                    {
+                        xim_handler.pending_compose_backspace = true;
+                    }
+                    super::xim_handler::xim_debug_log(&format!(
+                        "[xim] key press key={} composing={}",
+                        keystroke.key, state.composing
+                    ));
+                }
                 drop(state);
 
                 let xim_filtered = ximc.filter_event(&event, &mut xim_handler);
-                let xim_callback_event = xim_handler.last_callback_event.take();
+                let xim_callback_events = xim_handler.take_callbacks();
 
                 let mut state = self.0.borrow_mut();
+                let needs_spot_refresh = xim_handler.needs_spot_refresh;
+                xim_handler.needs_spot_refresh = false;
                 state.restore_xim(ximc, xim_handler);
                 drop(state);
 
-                if let Some(event) = xim_callback_event {
-                    self.handle_xim_callback_event(event);
+                self.handle_xim_callback_events(xim_callback_events);
+                if needs_spot_refresh {
+                    self.enable_ime();
                 }
 
                 match xim_filtered {
@@ -766,6 +796,7 @@ impl X11Client {
                 }
             }
         }
+        self.xim_finish_last_char_backspace();
         Ok(())
     }
 
@@ -881,7 +912,10 @@ impl X11Client {
                     .push(xim::AttributeName::Area, area);
             });
         }
-        if ximc.create_ic(xim_handler.im_id, ic_attributes.build()).is_err() {
+        if ximc
+            .create_ic(xim_handler.im_id, ic_attributes.build())
+            .is_err()
+        {
             xim_handler.ic_pending = false;
         }
         let mut state = self.0.borrow_mut();
@@ -1211,7 +1245,7 @@ impl X11Client {
                                 let pre_edit =
                                     state.pre_edit_text.clone().unwrap_or(String::default());
                                 drop(state);
-                                window.handle_ime_preedit(pre_edit);
+                                window.handle_ime_preedit(pre_edit, None);
                                 state = self.0.borrow_mut();
                             }
                             xkbc::Status::Cancelled => {
@@ -1221,7 +1255,7 @@ impl X11Client {
                                     window.handle_ime_commit(pre_edit);
                                 }
                                 if let Some(current_key) = keystroke_underlying_dead_key(keysym) {
-                                    window.handle_ime_preedit(current_key);
+                                    window.handle_ime_preedit(current_key, None);
                                 }
                                 state = self.0.borrow_mut();
                                 compose_state.feed(keysym);
@@ -1540,31 +1574,79 @@ impl X11Client {
         Some(())
     }
 
-    fn handle_xim_callback_event(&self, event: XimCallbackEvent) {
-        match event {
-            XimCallbackEvent::XimXEvent(event) => {
-                self.handle_event(event);
-            }
-            XimCallbackEvent::XimCommitEvent(window, text) => {
-                self.xim_handle_commit(window, text);
-            }
-            XimCallbackEvent::XimPreeditEvent(window, text) => {
-                self.xim_handle_preedit(window, text);
-            }
+    fn xim_finish_last_char_backspace(&self) {
+        let mut state = self.0.borrow_mut();
+        let Some(handler) = state.xim_handler.as_mut() else {
+            return;
         };
+        let Some(text) = handler.take_last_char_backspace() else {
+            return;
+        };
+        if handler.should_skip_apply(&text) {
+            state.composing = false;
+            return;
+        }
+        handler.remember_applied(&text);
+        let window_id = state
+            .keyboard_focused_window
+            .or_else(|| state.xim_handler.as_ref().map(|handler| handler.window));
+        state.composing = false;
+        let Some(window_id) = window_id else {
+            return;
+        };
+        drop(state);
+        let Some(window) = self.get_window(window_id) else {
+            return;
+        };
+        super::xim_handler::xim_debug_log("[xim] apply preedit \"\" (last char, no draw)");
+        window.handle_ime_preedit(text, None);
+    }
+
+    fn handle_xim_callback_events(&self, events: Vec<XimCallbackEvent>) {
+        let composing = self.0.borrow().composing;
+        let mut applied_ime = false;
+        for event in events {
+            match event {
+                XimCallbackEvent::XimXEvent(event) => {
+                    if (composing || applied_ime) && matches!(event, Event::KeyPress(_)) {
+                        super::xim_handler::xim_debug_log(
+                            "[xim] skip forwarded key after ime",
+                        );
+                        continue;
+                    }
+                    self.handle_event(event);
+                }
+                XimCallbackEvent::XimCommitEvent(window, text) => {
+                    applied_ime = true;
+                    self.xim_handle_commit(window, text);
+                }
+                XimCallbackEvent::XimPreeditEvent(window, text, _caret) => {
+                    applied_ime = true;
+                    self.xim_handle_preedit(window, text);
+                }
+            }
+        }
     }
 
     fn xim_handle_event(&self, event: Event) -> Option<()> {
         match event {
             Event::KeyPress(event) | Event::KeyRelease(event) => {
                 let mut state = self.0.borrow_mut();
-                state.pre_key_char_down = Some(keystroke_from_xkb(
+                let keystroke = keystroke_from_xkb(
                     &state.xkb,
                     state.modifiers,
                     event.detail.into(),
-                ));
+                );
+                state.pre_key_char_down = Some(keystroke.clone());
                 let (mut ximc, mut xim_handler) = state.take_xim()?;
                 drop(state);
+                if event.response_type == x11rb::protocol::xproto::KEY_PRESS_EVENT {
+                    xim_handler.pending_key = keystroke.key_char.as_deref().and_then(|s| {
+                        let mut chars = s.chars();
+                        let ch = chars.next()?;
+                        chars.next().is_none().then_some(ch)
+                    });
+                }
                 xim_handler.window = event.event;
                 ximc.forward_event(
                     xim_handler.im_id,
@@ -1592,7 +1674,23 @@ impl X11Client {
         };
         let mut state = self.0.borrow_mut();
         state.composing = false;
+        let mut text = text;
+        if let Some(key_char) = state
+            .pre_key_char_down
+            .as_ref()
+            .and_then(|key| key.key_char.as_deref())
+        {
+            if matches!(key_char, " " | "," | "." | "?" | "!" | ";" | ":")
+                && !text.ends_with(key_char)
+            {
+                text.push_str(key_char);
+            }
+        }
+        if let Some(handler) = state.xim_handler.as_mut() {
+            handler.remember_applied(&text);
+        }
         drop(state);
+        super::xim_handler::xim_debug_log(&format!("[xim] apply commit {text:?}"));
         window.handle_ime_commit(text);
         Some(())
     }
@@ -1604,10 +1702,18 @@ impl X11Client {
         };
 
         let mut state = self.0.borrow_mut();
+        if let Some(handler) = state.xim_handler.as_mut() {
+            if handler.should_skip_apply(&text) {
+                state.composing = !text.is_empty();
+                return Some(());
+            }
+            handler.remember_applied(&text);
+        }
         let (mut ximc, xim_handler) = state.take_xim()?;
         state.composing = !text.is_empty();
         drop(state);
-        window.handle_ime_preedit(text);
+        super::xim_handler::xim_debug_log(&format!("[xim] apply preedit {text:?}"));
+        window.handle_ime_preedit(text, None);
 
         if let Some(scaled_area) = window.get_ime_area() {
             let ic_attributes = ximc

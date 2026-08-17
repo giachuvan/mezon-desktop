@@ -3,61 +3,53 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::SharedString;
+use unicode_segmentation::UnicodeSegmentation;
 
 pub const MAX_UNDO_HISTORY: usize = 256;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CharKind {
-    Whitespace,
-    Word,
-    Punctuation,
+fn word_bound_segments(text: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
+    text.split_word_bound_indices()
+        .map(|(start, segment)| (start, start + segment.len()))
 }
 
-fn char_kind(c: char) -> CharKind {
-    if c.is_whitespace() {
-        CharKind::Whitespace
-    } else if c.is_alphanumeric() || c == '_' {
-        CharKind::Word
-    } else {
-        CharKind::Punctuation
-    }
+fn segment_is_whitespace(text: &str, start: usize, end: usize) -> bool {
+    text[start..end].chars().all(char::is_whitespace)
+}
+
+fn segment_is_word(text: &str, start: usize, end: usize) -> bool {
+    text[start..end]
+        .chars()
+        .any(|c| c.is_alphanumeric() || c == '_')
 }
 
 pub fn previous_word_boundary(text: &str, offset: usize) -> usize {
     let offset = offset.min(text.len());
-    let mut run_kind: Option<CharKind> = None;
-    let mut boundary = 0;
-    for (idx, c) in text[..offset].char_indices().rev() {
-        let kind = char_kind(c);
-        match run_kind {
-            None => {
-                if kind == CharKind::Whitespace {
-                    continue;
-                }
-                run_kind = Some(kind);
-                boundary = idx;
-            }
-            Some(run) if kind == run => boundary = idx,
-            Some(_) => return idx + c.len_utf8(),
+    if offset == 0 {
+        return 0;
+    }
+    let mut start = 0;
+    for (seg_start, seg_end) in word_bound_segments(text) {
+        if seg_start >= offset {
+            break;
+        }
+        if !segment_is_whitespace(text, seg_start, seg_end) {
+            start = seg_start;
         }
     }
-    boundary
+    start
 }
 
 pub fn next_word_boundary(text: &str, offset: usize) -> usize {
     let offset = offset.min(text.len());
-    let mut run_kind: Option<CharKind> = None;
-    for (idx, c) in text[offset..].char_indices() {
-        let kind = char_kind(c);
-        match run_kind {
-            None => {
-                if kind == CharKind::Whitespace {
-                    continue;
-                }
-                run_kind = Some(kind);
-            }
-            Some(run) if kind == run => {}
-            Some(_) => return offset + idx,
+    if offset == text.len() {
+        return text.len();
+    }
+    for (seg_start, seg_end) in word_bound_segments(text) {
+        if seg_end <= offset {
+            continue;
+        }
+        if !segment_is_whitespace(text, seg_start, seg_end) {
+            return seg_end;
         }
     }
     text.len()
@@ -93,32 +85,26 @@ pub fn home_target(text: &str, offset: usize) -> usize {
 
 pub fn word_range_at(text: &str, offset: usize) -> Range<usize> {
     let offset = offset.min(text.len());
-    let before = text[..offset].chars().next_back().map(char_kind);
-    let after = text[offset..].chars().next().map(char_kind);
-    let kind = match (before, after) {
-        (Some(b), Some(a)) if b != CharKind::Whitespace && a != CharKind::Whitespace => {
-            if b == CharKind::Word { b } else { a }
+    let mut best: Option<(usize, usize, u8)> = None;
+    for (start, end) in word_bound_segments(text) {
+        if start > offset || end < offset || start == end {
+            continue;
         }
-        (_, Some(a)) if a != CharKind::Whitespace => a,
-        (Some(b), _) if b != CharKind::Whitespace => b,
-        (_, Some(a)) => a,
-        (Some(b), None) => b,
-        (None, None) => return 0..0,
-    };
-    let start = text[..offset]
-        .char_indices()
-        .rev()
-        .take_while(|(_, c)| char_kind(*c) == kind)
-        .map(|(idx, _)| idx)
-        .last()
-        .unwrap_or(offset);
-    let end = text[offset..]
-        .char_indices()
-        .take_while(|(_, c)| char_kind(*c) == kind)
-        .map(|(idx, c)| offset + idx + c.len_utf8())
-        .last()
-        .unwrap_or(offset);
-    start..end
+        let rank = if segment_is_word(text, start, end) {
+            2
+        } else if !segment_is_whitespace(text, start, end) {
+            1
+        } else {
+            0
+        };
+        match best {
+            Some((_, _, best_rank)) if rank < best_rank => {}
+            Some((best_start, _, best_rank)) if rank == best_rank && start > best_start => {}
+            _ => best = Some((start, end, rank)),
+        }
+    }
+    best.map(|(start, end, _)| start..end)
+        .unwrap_or(offset..offset)
 }
 
 pub fn line_range_at(text: &str, offset: usize) -> Range<usize> {
@@ -189,6 +175,65 @@ pub fn should_coalesce(last: Option<EditKind>, kind: EditKind) -> bool {
     matches!(kind, EditKind::Insert | EditKind::Delete) && last == Some(kind)
 }
 
+pub fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let index = index.min(text.len());
+    if text.is_char_boundary(index) {
+        return index;
+    }
+    let mut i = index;
+    while i > 0 {
+        i -= 1;
+        if text.is_char_boundary(i) {
+            return i;
+        }
+    }
+    0
+}
+
+pub fn ceil_char_boundary(text: &str, index: usize) -> usize {
+    let index = index.min(text.len());
+    if text.is_char_boundary(index) {
+        return index;
+    }
+    let mut i = index + 1;
+    while i < text.len() {
+        if text.is_char_boundary(i) {
+            return i;
+        }
+        i += 1;
+    }
+    text.len()
+}
+
+pub fn surrounding_delete_range(
+    text: &str,
+    selected_range: &Range<usize>,
+    marked_range: Option<&Range<usize>>,
+    selection_reversed: bool,
+    before_len: usize,
+    after_len: usize,
+) -> Range<usize> {
+    let (left, right) = if let Some(marked) = marked_range {
+        (marked.start.min(text.len()), marked.end.min(text.len()))
+    } else if selected_range.start != selected_range.end {
+        (
+            selected_range.start.min(text.len()),
+            selected_range.end.min(text.len()),
+        )
+    } else {
+        let caret = if selection_reversed {
+            selected_range.start
+        } else {
+            selected_range.end
+        }
+        .min(text.len());
+        (caret, caret)
+    };
+    let start = floor_char_boundary(text, left.saturating_sub(before_len));
+    let end = ceil_char_boundary(text, right.saturating_add(after_len));
+    start..end
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,12 +257,19 @@ mod tests {
     }
 
     #[test]
-    fn word_boundary_treats_punctuation_as_its_own_run() {
-        let text = "foo.bar baz";
+    fn word_boundary_treats_hyphen_as_its_own_run() {
+        let text = "foo-bar baz";
         assert_eq!(next_word_boundary(text, 0), 3);
         assert_eq!(next_word_boundary(text, 3), 4);
         assert_eq!(previous_word_boundary(text, 7), 4);
         assert_eq!(previous_word_boundary(text, 4), 3);
+    }
+
+    #[test]
+    fn word_boundary_keeps_a_mid_letter_dot_together() {
+        let text = "foo.bar baz";
+        assert_eq!(next_word_boundary(text, 0), 7);
+        assert_eq!(previous_word_boundary(text, 7), 0);
     }
 
     #[test]
@@ -270,17 +322,25 @@ mod tests {
     }
 
     #[test]
-    fn word_range_treats_punctuation_as_its_own_run() {
-        let text = "foo.bar";
+    fn word_range_treats_hyphen_as_its_own_run() {
+        let text = "foo-bar";
         assert_eq!(word_range_at(text, 0), 0..3);
         assert_eq!(word_range_at(text, 4), 4..7);
     }
 
     #[test]
-    fn word_range_at_a_run_boundary_prefers_the_word_over_the_punctuation() {
-        let text = "foo.bar";
+    fn word_range_at_a_hyphen_boundary_prefers_the_word() {
+        let text = "foo-bar";
         assert_eq!(word_range_at(text, 3), 0..3);
         assert_eq!(word_range_at(text, 4), 4..7);
+    }
+
+    #[test]
+    fn word_range_keeps_a_mid_letter_dot_together() {
+        let text = "foo.bar";
+        assert_eq!(word_range_at(text, 0), 0..7);
+        assert_eq!(word_range_at(text, 3), 0..7);
+        assert_eq!(word_range_at(text, 4), 0..7);
     }
 
     #[test]
@@ -288,6 +348,23 @@ mod tests {
         let text = "chào bạn";
         assert_eq!(word_range_at(text, 2), 0..5);
         assert_eq!(word_range_at(text, 7), 6..text.len());
+    }
+
+    #[test]
+    fn word_range_keeps_a_uax29_contraction_together() {
+        let text = "don't stop";
+        assert_eq!(word_range_at(text, 2), 0..5);
+        assert_eq!(next_word_boundary(text, 0), 5);
+        assert_eq!(previous_word_boundary(text, 5), 0);
+        assert_eq!(previous_word_boundary(text, text.len()), 6);
+    }
+
+    #[test]
+    fn word_range_treats_vietnamese_letters_as_one_word() {
+        let text = "tiếng Việt";
+        assert_eq!(word_range_at(text, 2), 0.."tiếng".len());
+        assert_eq!(next_word_boundary(text, 0), "tiếng".len());
+        assert_eq!(previous_word_boundary(text, text.len()), "tiếng ".len());
     }
 
     #[test]
@@ -335,5 +412,23 @@ mod tests {
             extend_range_for_granularity(text, &anchor, 5, SelectGranularity::Word, false);
         assert_eq!(range, 4..7);
         assert!(!reversed);
+    }
+
+    #[test]
+    fn surrounding_delete_removes_the_vowel_before_a_telex_tone() {
+        assert_eq!(
+            surrounding_delete_range("hoa", &(3..3), None, false, 1, 0),
+            2..3
+        );
+    }
+
+    #[test]
+    fn surrounding_delete_snaps_mid_character_offsets_to_utf8_boundaries() {
+        let text = "á";
+        let end = text.len();
+        let range = surrounding_delete_range(text, &(end..end), None, false, 1, 0);
+        assert!(text.is_char_boundary(range.start));
+        assert!(text.is_char_boundary(range.end));
+        assert_eq!(&text[range], "á");
     }
 }
