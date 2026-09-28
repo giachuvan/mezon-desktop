@@ -784,6 +784,8 @@ impl CallPanelView {
             .child(
                 div()
                     .flex_1()
+                    .min_w(px(0.))
+                    .whitespace_normal()
                     .text_sm()
                     .text_color(rgb(0xffffff))
                     .child(label),

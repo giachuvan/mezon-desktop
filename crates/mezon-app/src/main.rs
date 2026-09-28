@@ -1086,14 +1086,17 @@ fn open_main_window(
     mezon_store::AudioStore::set_device_enumerator(
         &audio_store,
         std::sync::Arc::new(|| {
-            let inputs = mezon_native::audio::enumerate_input_devices()
+            let snapshot = mezon_native::audio::audio_device_snapshot();
+            let inputs = snapshot
+                .inputs
                 .into_iter()
                 .map(|d| mezon_store::AudioDeviceInfo {
                     id: d.id,
                     name: d.name,
                 })
                 .collect::<Vec<_>>();
-            let outputs = mezon_native::audio::enumerate_output_devices()
+            let outputs = snapshot
+                .outputs
                 .into_iter()
                 .map(|d| mezon_store::AudioDeviceInfo {
                     id: d.id,
@@ -1103,8 +1106,8 @@ fn open_main_window(
             mezon_store::DeviceSnapshot {
                 inputs,
                 outputs,
-                default_input_name: mezon_native::audio::default_input_device_name(),
-                default_output_name: mezon_native::audio::default_output_device_name(),
+                default_input_name: snapshot.default_input_name,
+                default_output_name: snapshot.default_output_name,
             }
         }),
         cx,
