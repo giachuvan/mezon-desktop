@@ -53,7 +53,10 @@ impl WebmPlayerImpl {
         if url.is_empty() {
             return Err(PlayerError::InvalidUrl);
         }
-        let bytes = load_bytes(url)?;
+        Self::open_bytes(load_bytes(url)?, max_size)
+    }
+
+    pub fn open_bytes(bytes: Vec<u8>, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
         let cursor = Cursor::new(bytes);
         let mut demuxer = MatroskaFile::open(cursor).map_err(|error| {
             tracing::warn!(target: "mezon_video", ?error, "webm demuxer open failed");
@@ -292,7 +295,7 @@ fn video_duration_seconds(
     Ok(duration)
 }
 
-fn load_bytes(url: &str) -> Result<Vec<u8>, PlayerError> {
+pub(crate) fn load_bytes(url: &str) -> Result<Vec<u8>, PlayerError> {
     if url.starts_with("http://") || url.starts_with("https://") {
         let mut response = ureq::get(url).call().map_err(|error| {
             tracing::warn!(target: "mezon_video", ?error, "webm download failed");

@@ -114,6 +114,14 @@ impl PlayerImpl {
         Ok(Self { inner })
     }
 
+    pub fn open_webm(bytes: Vec<u8>, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
+        Ok(Self {
+            inner: PlayerBackend::Webm(crate::webm_player::WebmPlayerImpl::open_bytes(
+                bytes, max_size,
+            )?),
+        })
+    }
+
     pub fn copy_frame(&self) -> Option<VideoFrame> {
         match &self.inner {
             PlayerBackend::MediaFoundation(player) => player.copy_frame(),

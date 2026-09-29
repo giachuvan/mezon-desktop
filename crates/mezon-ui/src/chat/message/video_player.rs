@@ -7,7 +7,7 @@ use gpui::{
     Task, Window, canvas, div, img, prelude::*, px, relative,
 };
 use mezon_store::PlatformStore;
-use mezon_video::{VideoFrame, VideoPlayer};
+use mezon_video::{VideoFrame, VideoPlayer, is_webm_url, load_webm_bytes};
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{Icon, IconName, h_flex};
@@ -159,31 +159,61 @@ impl VideoPlayerView {
         view
     }
 
+    fn finish_open(
+        &mut self,
+        opened: Result<VideoPlayer, mezon_video::PlayerError>,
+        cx: &mut Context<Self>,
+    ) {
+        self._open_task = None;
+        match opened {
+            Ok(player) => {
+                let player = Rc::new(player);
+                player.play();
+                self.player = Some(player);
+                self.load_state = VideoLoadState::Ready;
+                self.shared.borrow_mut().playing = true;
+            }
+            Err(_) => {
+                self.load_state = VideoLoadState::Failed;
+            }
+        }
+        cx.notify();
+    }
+
     fn start_open(&mut self, cx: &mut Context<Self>) {
         self.load_state = VideoLoadState::Loading;
         self._open_task = None;
         let url = self.url.clone();
         let decode_max_size = self.decode_max_size;
         self._open_task = Some(cx.spawn(async move |this, cx| {
-            let opened = cx
-                .background_executor()
-                .spawn(async move { VideoPlayer::open(url.as_ref(), decode_max_size) })
-                .await;
+            #[cfg(any(windows, target_os = "macos"))]
+            if is_webm_url(url.as_ref()) {
+                let load_url = url.clone();
+                let bytes = cx
+                    .background_executor()
+                    .spawn(async move { load_webm_bytes(load_url.as_ref()) })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    let opened = bytes
+                        .and_then(|data| VideoPlayer::open_from_webm_bytes(data, decode_max_size));
+                    this.finish_open(opened, cx);
+                });
+                return;
+            }
+
+            #[cfg(target_os = "linux")]
+            {
+                let opened = cx
+                    .background_executor()
+                    .spawn(async move { VideoPlayer::open(url.as_ref(), decode_max_size) })
+                    .await;
+                let _ = this.update(cx, |this, cx| this.finish_open(opened, cx));
+                return;
+            }
+
             let _ = this.update(cx, |this, cx| {
-                this._open_task = None;
-                match opened {
-                    Ok(player) => {
-                        let player = Rc::new(player);
-                        player.play();
-                        this.player = Some(player);
-                        this.load_state = VideoLoadState::Ready;
-                        this.shared.borrow_mut().playing = true;
-                    }
-                    Err(_) => {
-                        this.load_state = VideoLoadState::Failed;
-                    }
-                }
-                cx.notify();
+                let opened = VideoPlayer::open(url.as_ref(), decode_max_size);
+                this.finish_open(opened, cx);
             });
         }));
     }

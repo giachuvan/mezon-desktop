@@ -116,6 +116,30 @@ pub fn scaled_image_decode_path(_path: &std::path::Path, _max_px: u32) -> Option
     None
 }
 
+pub fn is_webm_url(url: &str) -> bool {
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        webm_player::is_webm_source(url)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = url;
+        false
+    }
+}
+
+pub fn load_webm_bytes(url: &str) -> Result<Vec<u8>, PlayerError> {
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        webm_player::load_bytes(url)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = url;
+        Err(PlayerError::Unsupported)
+    }
+}
+
 pub struct VideoPlayer {
     inner: platform::PlayerImpl,
 }
@@ -124,6 +148,22 @@ impl VideoPlayer {
     pub fn open(url: &str, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
         let inner = platform::PlayerImpl::open(url, max_size)?;
         Ok(Self { inner })
+    }
+
+    pub fn open_from_webm_bytes(
+        bytes: Vec<u8>,
+        max_size: Option<(u32, u32)>,
+    ) -> Result<Self, PlayerError> {
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            let inner = platform::PlayerImpl::open_webm(bytes, max_size)?;
+            Ok(Self { inner })
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        {
+            let _ = (bytes, max_size);
+            Err(PlayerError::Unsupported)
+        }
     }
 
     pub fn copy_frame(&self) -> Option<VideoFrame> {
