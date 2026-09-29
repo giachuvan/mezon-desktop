@@ -153,6 +153,12 @@ impl PlayerImpl {
         })
     }
 
+    pub fn from_webm(player: crate::webm_player::WebmPlayerImpl) -> Self {
+        Self {
+            inner: PlayerBackend::Webm(player),
+        }
+    }
+
     pub fn copy_frame(&self) -> Option<VideoFrame> {
         match &self.inner {
             PlayerBackend::AvFoundation(player) => player.copy_frame(),

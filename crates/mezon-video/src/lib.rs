@@ -128,15 +128,13 @@ pub fn is_webm_url(url: &str) -> bool {
     }
 }
 
-pub fn load_webm_bytes(url: &str) -> Result<Vec<u8>, PlayerError> {
-    #[cfg(any(windows, target_os = "macos"))]
-    {
-        webm_player::load_bytes(url)
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        let _ = url;
-        Err(PlayerError::Unsupported)
+#[cfg(any(windows, target_os = "macos"))]
+pub struct PreparedWebm(webm_player::WebmPlayerImpl);
+
+#[cfg(any(windows, target_os = "macos"))]
+impl PreparedWebm {
+    pub fn open(url: &str, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
+        Ok(Self(webm_player::WebmPlayerImpl::open(url, max_size)?))
     }
 }
 
@@ -150,19 +148,10 @@ impl VideoPlayer {
         Ok(Self { inner })
     }
 
-    pub fn open_from_webm_bytes(
-        bytes: Vec<u8>,
-        max_size: Option<(u32, u32)>,
-    ) -> Result<Self, PlayerError> {
-        #[cfg(any(windows, target_os = "macos"))]
-        {
-            let inner = platform::PlayerImpl::open_webm(bytes, max_size)?;
-            Ok(Self { inner })
-        }
-        #[cfg(not(any(windows, target_os = "macos")))]
-        {
-            let _ = (bytes, max_size);
-            Err(PlayerError::Unsupported)
+    #[cfg(any(windows, target_os = "macos"))]
+    pub fn from_prepared_webm(prepared: PreparedWebm) -> Self {
+        Self {
+            inner: platform::PlayerImpl::from_webm(prepared.0),
         }
     }
 

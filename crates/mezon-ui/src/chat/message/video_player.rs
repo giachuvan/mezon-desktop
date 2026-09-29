@@ -7,7 +7,9 @@ use gpui::{
     Task, Window, canvas, div, img, prelude::*, px, relative,
 };
 use mezon_store::PlatformStore;
-use mezon_video::{VideoFrame, VideoPlayer, is_webm_url, load_webm_bytes};
+#[cfg(any(windows, target_os = "macos"))]
+use mezon_video::{PreparedWebm, is_webm_url};
+use mezon_video::{VideoFrame, VideoPlayer};
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{Icon, IconName, h_flex};
@@ -188,15 +190,13 @@ impl VideoPlayerView {
         self._open_task = Some(cx.spawn(async move |this, cx| {
             #[cfg(any(windows, target_os = "macos"))]
             if is_webm_url(url.as_ref()) {
-                let load_url = url.clone();
-                let bytes = cx
+                let open_url = url.clone();
+                let prepared = cx
                     .background_executor()
-                    .spawn(async move { load_webm_bytes(load_url.as_ref()) })
+                    .spawn(async move { PreparedWebm::open(open_url.as_ref(), decode_max_size) })
                     .await;
                 let _ = this.update(cx, |this, cx| {
-                    let opened = bytes
-                        .and_then(|data| VideoPlayer::open_from_webm_bytes(data, decode_max_size));
-                    this.finish_open(opened, cx);
+                    this.finish_open(prepared.map(VideoPlayer::from_prepared_webm), cx);
                 });
                 return;
             }

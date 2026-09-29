@@ -1,6 +1,5 @@
-use std::cell::{Cell, RefCell};
 use std::io::Cursor;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
 use matroska_demuxer::{DemuxError, Frame, MatroskaFile, TrackType};
@@ -36,14 +35,17 @@ struct DemuxState {
     eos: bool,
 }
 
+#[cfg(target_os = "macos")]
+unsafe impl Send for DemuxState {}
+
 pub struct WebmPlayerImpl {
     state: Mutex<DemuxState>,
     duration_seconds: f64,
-    playing: Cell<bool>,
-    play_started_at: RefCell<Option<Instant>>,
-    play_offset_ns: Cell<u64>,
-    volume: Cell<f32>,
-    muted: Cell<bool>,
+    playing: AtomicBool,
+    play_started_at: Mutex<Option<Instant>>,
+    play_offset_ns: AtomicU64,
+    volume_bits: AtomicU32,
+    muted: AtomicBool,
     failed: AtomicBool,
     max_size: Option<(u32, u32)>,
 }
@@ -98,11 +100,11 @@ impl WebmPlayerImpl {
         Ok(Self {
             state: Mutex::new(state),
             duration_seconds,
-            playing: Cell::new(false),
-            play_started_at: RefCell::new(None),
-            play_offset_ns: Cell::new(0),
-            volume: Cell::new(1.0),
-            muted: Cell::new(false),
+            playing: AtomicBool::new(false),
+            play_started_at: Mutex::new(None),
+            play_offset_ns: AtomicU64::new(0),
+            volume_bits: AtomicU32::new(1.0f32.to_bits()),
+            muted: AtomicBool::new(false),
             failed: AtomicBool::new(false),
             max_size,
         })
@@ -112,13 +114,16 @@ impl WebmPlayerImpl {
         if self.failed.load(Ordering::SeqCst) {
             return None;
         }
-        let target_ns = if self.playing.get() {
-            self.play_offset_ns.get().saturating_add(self.elapsed_ns())
+        let playing = self.playing.load(Ordering::SeqCst);
+        let target_ns = if playing {
+            self.play_offset_ns
+                .load(Ordering::SeqCst)
+                .saturating_add(self.elapsed_ns())
         } else {
-            self.play_offset_ns.get()
+            self.play_offset_ns.load(Ordering::SeqCst)
         };
         let mut state = self.state.lock();
-        if self.playing.get() && !state.eos {
+        if playing && !state.eos {
             let _ = advance_to(&mut state, target_ns, self.max_size);
         }
         state.cached.clone()
@@ -128,28 +133,30 @@ impl WebmPlayerImpl {
         if self.failed.load(Ordering::SeqCst) {
             return;
         }
-        if !self.playing.replace(true) {
-            *self.play_started_at.borrow_mut() = Some(Instant::now());
+        if !self.playing.swap(true, Ordering::SeqCst) {
+            *self.play_started_at.lock() = Some(Instant::now());
         }
     }
 
     pub fn pause(&self) {
-        if self.playing.replace(false) {
+        if self.playing.swap(false, Ordering::SeqCst) {
             self.play_offset_ns
-                .set(self.play_offset_ns.get().saturating_add(self.elapsed_ns()));
-            *self.play_started_at.borrow_mut() = None;
+                .fetch_add(self.elapsed_ns(), Ordering::SeqCst);
+            *self.play_started_at.lock() = None;
         }
     }
 
     pub fn is_playing(&self) -> bool {
-        self.playing.get()
+        self.playing.load(Ordering::SeqCst)
     }
 
     pub fn current_time(&self) -> f64 {
-        let ns = if self.playing.get() {
-            self.play_offset_ns.get().saturating_add(self.elapsed_ns())
+        let ns = if self.playing.load(Ordering::SeqCst) {
+            self.play_offset_ns
+                .load(Ordering::SeqCst)
+                .saturating_add(self.elapsed_ns())
         } else {
-            self.play_offset_ns.get()
+            self.play_offset_ns.load(Ordering::SeqCst)
         };
         (ns as f64 / 1_000_000_000.0).min(self.duration_seconds)
     }
@@ -168,9 +175,9 @@ impl WebmPlayerImpl {
             0.0
         };
         let target_ns = (target * 1_000_000_000.0) as u64;
-        self.playing.set(false);
-        *self.play_started_at.borrow_mut() = None;
-        self.play_offset_ns.set(target_ns);
+        self.playing.store(false, Ordering::SeqCst);
+        *self.play_started_at.lock() = None;
+        self.play_offset_ns.store(target_ns, Ordering::SeqCst);
         let mut state = self.state.lock();
         state.vp8 = Vp8DecoderState::new();
         state.last_frame_ns = 0;
@@ -187,19 +194,20 @@ impl WebmPlayerImpl {
     }
 
     pub fn set_volume(&self, volume: f32) {
-        self.volume.set(volume.clamp(0.0, 1.0));
+        self.volume_bits
+            .store(volume.clamp(0.0, 1.0).to_bits(), Ordering::SeqCst);
     }
 
     pub fn volume(&self) -> f32 {
-        self.volume.get()
+        f32::from_bits(self.volume_bits.load(Ordering::SeqCst))
     }
 
     pub fn set_muted(&self, muted: bool) {
-        self.muted.set(muted);
+        self.muted.store(muted, Ordering::SeqCst);
     }
 
     pub fn is_muted(&self) -> bool {
-        self.muted.get()
+        self.muted.load(Ordering::SeqCst)
     }
 
     pub fn failed(&self) -> bool {
@@ -208,7 +216,7 @@ impl WebmPlayerImpl {
 
     fn elapsed_ns(&self) -> u64 {
         self.play_started_at
-            .borrow()
+            .lock()
             .as_ref()
             .map(|started| started.elapsed().as_nanos() as u64)
             .unwrap_or(0)
@@ -446,6 +454,13 @@ fn scale_bgra(source: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_send<T: Send>() {}
+
+    #[test]
+    fn webm_player_is_send() {
+        assert_send::<WebmPlayerImpl>();
+    }
 
     #[test]
     fn webm_sources_are_detected_by_extension() {
