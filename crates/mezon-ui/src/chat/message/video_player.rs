@@ -4,7 +4,7 @@ use std::rc::Rc;
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, DragMoveEvent, Empty, Entity, EntityId,
     FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, ObjectFit, Pixels, Rgba, SharedString,
-    Window, canvas, div, img, prelude::*, px, relative,
+    Task, Window, canvas, div, img, prelude::*, px, relative,
 };
 use mezon_store::PlatformStore;
 use mezon_video::{VideoFrame, VideoPlayer};
@@ -79,6 +79,13 @@ struct SharedPlayback {
 
 type Shared = Rc<RefCell<SharedPlayback>>;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VideoLoadState {
+    Loading,
+    Ready,
+    Failed,
+}
+
 #[derive(Clone)]
 struct SeekDrag(EntityId);
 
@@ -100,11 +107,14 @@ pub struct VideoPlayerView {
     width: f32,
     height: f32,
     player: Option<Rc<VideoPlayer>>,
+    load_state: VideoLoadState,
+    decode_max_size: Option<(u32, u32)>,
     shared: Shared,
     track_bounds: Bounds<Pixels>,
     time_label: SharedString,
     last_label_seconds: (u64, u64),
     image_cache: Entity<LruImageCache>,
+    _open_task: Option<Task<()>>,
 }
 
 impl VideoPlayerView {
@@ -120,18 +130,9 @@ impl VideoPlayerView {
             decode_max_size,
             locale,
         } = activation;
-        let player = VideoPlayer::open(url.as_ref(), decode_max_size)
-            .ok()
-            .map(Rc::new);
-        if let Some(player) = player.as_ref() {
-            player.play();
-        }
-        let shared = Rc::new(RefCell::new(SharedPlayback {
-            playing: player.is_some(),
-            ..SharedPlayback::default()
-        }));
+        let shared = Rc::new(RefCell::new(SharedPlayback::default()));
         Self::register_teardown(cx);
-        Self {
+        let mut view = Self {
             theater: false,
             fullscreen_mode,
             layout,
@@ -142,7 +143,9 @@ impl VideoPlayerView {
             locale,
             width,
             height,
-            player,
+            player: None,
+            load_state: VideoLoadState::Loading,
+            decode_max_size,
             shared,
             track_bounds: Bounds::default(),
             time_label: SharedString::new_static("00:00 / 00:00"),
@@ -150,7 +153,39 @@ impl VideoPlayerView {
             image_cache: cx.new(|cx| {
                 LruImageCache::message("video-poster", 2, 16 * 1024 * 1024, 16 * 1024 * 1024, cx)
             }),
-        }
+            _open_task: None,
+        };
+        view.start_open(cx);
+        view
+    }
+
+    fn start_open(&mut self, cx: &mut Context<Self>) {
+        self.load_state = VideoLoadState::Loading;
+        self._open_task = None;
+        let url = self.url.clone();
+        let decode_max_size = self.decode_max_size;
+        self._open_task = Some(cx.spawn(async move |this, cx| {
+            let opened = cx
+                .background_executor()
+                .spawn(async move { VideoPlayer::open(url.as_ref(), decode_max_size) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this._open_task = None;
+                match opened {
+                    Ok(player) => {
+                        let player = Rc::new(player);
+                        player.play();
+                        this.player = Some(player);
+                        this.load_state = VideoLoadState::Ready;
+                        this.shared.borrow_mut().playing = true;
+                    }
+                    Err(_) => {
+                        this.load_state = VideoLoadState::Failed;
+                    }
+                }
+                cx.notify();
+            });
+        }));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -182,6 +217,8 @@ impl VideoPlayerView {
             width,
             height,
             player: Some(player),
+            load_state: VideoLoadState::Ready,
+            decode_max_size: None,
             shared,
             track_bounds: Bounds::default(),
             time_label: SharedString::new_static("00:00 / 00:00"),
@@ -189,6 +226,7 @@ impl VideoPlayerView {
             image_cache: cx.new(|cx| {
                 LruImageCache::message("video-poster", 2, 16 * 1024 * 1024, 16 * 1024 * 1024, cx)
             }),
+            _open_task: None,
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
@@ -273,23 +311,20 @@ impl VideoPlayerView {
         self.track_bounds = Bounds::default();
         self.time_label = SharedString::new_static("00:00 / 00:00");
         self.last_label_seconds = (0, 0);
-        self.player = VideoPlayer::open(self.url.as_ref(), decode_max_size)
-            .ok()
-            .map(Rc::new);
-        if let Some(player) = self.player.as_ref() {
-            player.play();
-        }
+        self.decode_max_size = decode_max_size;
+        self._open_task = None;
         {
             let mut shared = self.shared.borrow_mut();
-            shared.playing = self.player.is_some();
+            shared.playing = false;
             shared.failed = false;
             shared.current_time = 0.0;
             shared.duration = 0.0;
         }
-        cx.notify();
+        self.start_open(cx);
     }
 
     pub fn shutdown(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        self._open_task = None;
         if let Some(player) = self.player.take() {
             player.pause();
             drop(player);
@@ -303,6 +338,7 @@ impl VideoPlayerView {
             shared.current_time = 0.0;
             shared.duration = 0.0;
         }
+        self.load_state = VideoLoadState::Loading;
     }
 
     pub fn pause_for_background(&mut self, cx: &mut Context<Self>) {
@@ -848,7 +884,20 @@ impl Render for VideoPlayerView {
                 .rounded_lg()
         };
 
-        if self.player.is_none() || failed {
+        if self.load_state == VideoLoadState::Loading {
+            let poster_fit = if self.layout == VideoLayout::FillContainer {
+                ObjectFit::Contain
+            } else {
+                ObjectFit::Cover
+            };
+            return root
+                .when(!self.poster.is_empty(), |d| {
+                    d.child(img(self.poster.clone()).size_full().object_fit(poster_fit))
+                })
+                .into_any_element();
+        }
+
+        if self.load_state == VideoLoadState::Failed || failed {
             let poster_fit = if self.layout == VideoLayout::FillContainer {
                 ObjectFit::Contain
             } else {

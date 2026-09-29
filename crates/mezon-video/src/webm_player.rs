@@ -79,12 +79,7 @@ impl WebmPlayerImpl {
                 PlayerError::Open
             })?;
         let timestamp_scale = demuxer.info().timestamp_scale().get();
-        let duration_seconds = demuxer
-            .info()
-            .duration()
-            .map(|ns| ns / 1_000_000_000.0)
-            .filter(|value| value.is_finite() && *value > 0.0)
-            .unwrap_or(0.0);
+        let duration_seconds = video_duration_seconds(&mut demuxer, video_track, timestamp_scale)?;
         let mut state = DemuxState {
             demuxer,
             video_track,
@@ -263,6 +258,38 @@ pub fn probe_webm(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
         });
     }
     None
+}
+
+fn video_duration_seconds(
+    demuxer: &mut MatroskaFile<Cursor<Vec<u8>>>,
+    video_track: u64,
+    timestamp_scale: u64,
+) -> Result<f64, PlayerError> {
+    if let Some(duration) = demuxer
+        .info()
+        .duration()
+        .map(|ns| ns / 1_000_000_000.0)
+        .filter(|value| value.is_finite() && *value > 0.0)
+    {
+        return Ok(duration);
+    }
+    let mut frame = Frame::default();
+    let mut max_ns = 0u64;
+    while demuxer.next_frame(&mut frame).ok() == Some(true) {
+        if frame.track == video_track {
+            max_ns = max_ns.max(frame.timestamp.saturating_mul(timestamp_scale));
+        }
+    }
+    let duration = if max_ns > 0 {
+        max_ns as f64 / 1_000_000_000.0
+    } else {
+        0.0
+    };
+    demuxer.seek(0).map_err(|error| {
+        tracing::warn!(target: "mezon_video", ?error, "webm duration seek reset failed");
+        PlayerError::Open
+    })?;
+    Ok(duration)
 }
 
 fn load_bytes(url: &str) -> Result<Vec<u8>, PlayerError> {
