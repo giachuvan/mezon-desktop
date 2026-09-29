@@ -56,3 +56,6 @@ windows = { workspace = true, features = [
     "Win32_Graphics_Imaging",
     "Win32_Storage_FileSystem",
 ] }
+
+[dev-dependencies]
+matroska-demuxer = "0.7"

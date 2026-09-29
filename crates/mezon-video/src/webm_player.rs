@@ -11,6 +11,14 @@ use crate::{PlayerError, VideoFrame, VideoProbe};
 
 const MAX_WEBM_BYTES: usize = 64 * 1024 * 1024;
 
+fn matroska_codec_id(id: &str) -> &str {
+    id.trim_end_matches('\0')
+}
+
+fn is_vp8_video_track(track: &matroska_demuxer::TrackEntry) -> bool {
+    track.track_type() == TrackType::Video && matroska_codec_id(track.codec_id()) == "V_VP8"
+}
+
 pub(crate) fn is_webm_source(url: &str) -> bool {
     let path = url.split(['?', '#']).next().unwrap_or(url);
     path.rsplit('/')
@@ -54,10 +62,20 @@ impl WebmPlayerImpl {
         let video_track = demuxer
             .tracks()
             .iter()
-            .find(|track| track.track_type() == TrackType::Video && track.codec_id() == "V_VP8")
+            .find(|track| is_vp8_video_track(track))
             .map(|track| track.track_number().get())
             .ok_or_else(|| {
-                tracing::warn!(target: "mezon_video", "webm has no VP8 video track");
+                let video_codecs: Vec<&str> = demuxer
+                    .tracks()
+                    .iter()
+                    .filter(|track| track.track_type() == TrackType::Video)
+                    .map(|track| matroska_codec_id(track.codec_id()))
+                    .collect();
+                tracing::warn!(
+                    target: "mezon_video",
+                    ?video_codecs,
+                    "webm has no VP8 video track"
+                );
                 PlayerError::Open
             })?;
         let timestamp_scale = demuxer.info().timestamp_scale().get();
@@ -205,7 +223,7 @@ pub fn probe_webm(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
     let video_track = demuxer
         .tracks()
         .iter()
-        .find(|track| track.track_type() == TrackType::Video && track.codec_id() == "V_VP8")?
+        .find(|track| is_vp8_video_track(track))?
         .track_number()
         .get();
     let mut frame = Frame::default();
@@ -404,5 +422,12 @@ mod tests {
         assert!(is_webm_source("https://cdn.example/clip.webm"));
         assert!(is_webm_source("https://cdn.example/clip.webm?token=1"));
         assert!(!is_webm_source("https://cdn.example/clip.mp4"));
+    }
+
+    #[test]
+    fn matroska_codec_id_strips_gstreamer_null_suffix() {
+        assert_eq!(matroska_codec_id("V_VP8\0"), "V_VP8");
+        assert_eq!(matroska_codec_id("V_VP8"), "V_VP8");
+        assert_eq!(matroska_codec_id("V_VP9\0"), "V_VP9");
     }
 }
