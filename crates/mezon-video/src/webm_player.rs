@@ -31,8 +31,19 @@ struct DemuxState {
     timestamp_scale: u64,
     vp8: Vp8DecoderState,
     last_frame_ns: u64,
+    last_emitted_ns: Option<u64>,
+    #[cfg(windows)]
+    cached_bgra: Option<CachedBgra>,
+    #[cfg(target_os = "macos")]
     cached: Option<VideoFrame>,
     eos: bool,
+}
+
+#[cfg(windows)]
+struct CachedBgra {
+    width: u32,
+    height: u32,
+    bgra: Vec<u8>,
 }
 
 #[cfg(target_os = "macos")]
@@ -91,6 +102,10 @@ impl WebmPlayerImpl {
             timestamp_scale,
             vp8: Vp8DecoderState::new(),
             last_frame_ns: 0,
+            last_emitted_ns: None,
+            #[cfg(windows)]
+            cached_bgra: None,
+            #[cfg(target_os = "macos")]
             cached: None,
             eos: false,
         };
@@ -126,7 +141,7 @@ impl WebmPlayerImpl {
         if playing && !state.eos {
             let _ = advance_to(&mut state, target_ns, self.max_size);
         }
-        state.cached.clone()
+        take_frame(&mut state)
     }
 
     pub fn play(&self) {
@@ -181,7 +196,15 @@ impl WebmPlayerImpl {
         let mut state = self.state.lock();
         state.vp8 = Vp8DecoderState::new();
         state.last_frame_ns = 0;
-        state.cached = None;
+        state.last_emitted_ns = None;
+        #[cfg(windows)]
+        {
+            state.cached_bgra = None;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            state.cached = None;
+        }
         state.eos = false;
         let seek_ts = target_ns / state.timestamp_scale.max(1);
         if state.demuxer.seek(seek_ts).is_err() {
@@ -331,20 +354,46 @@ pub(crate) fn load_bytes(url: &str) -> Result<Vec<u8>, PlayerError> {
     }
 }
 
+fn take_frame(state: &mut DemuxState) -> Option<VideoFrame> {
+    if state.last_emitted_ns == Some(state.last_frame_ns) {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        let cached = state.cached_bgra.as_ref()?;
+        let frame =
+            crate::render_frame::bgra_to_frame(cached.width, cached.height, cached.bgra.clone())?;
+        state.last_emitted_ns = Some(state.last_frame_ns);
+        return Some(frame);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let frame = state.cached.clone()?;
+        state.last_emitted_ns = Some(state.last_frame_ns);
+        return Some(frame);
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = state;
+        None
+    }
+}
+
 fn advance_to(
     state: &mut DemuxState,
     target_ns: u64,
     max_size: Option<(u32, u32)>,
 ) -> Result<bool, DemuxError> {
     if state.eos {
-        return Ok(true);
+        return Ok(has_cached_frame(state));
     }
     if state.last_frame_ns > target_ns {
         let seek_ts = target_ns / state.timestamp_scale.max(1);
         state.demuxer.seek(seek_ts)?;
         state.vp8 = Vp8DecoderState::new();
         state.last_frame_ns = 0;
-        state.cached = None;
+        state.last_emitted_ns = None;
+        clear_cached_frame(state);
         state.eos = false;
     }
     while state.last_frame_ns <= target_ns {
@@ -353,7 +402,38 @@ fn advance_to(
             break;
         }
     }
-    Ok(state.cached.is_some())
+    Ok(has_cached_frame(state))
+}
+
+fn has_cached_frame(state: &DemuxState) -> bool {
+    #[cfg(windows)]
+    {
+        return state.cached_bgra.is_some();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return state.cached.is_some();
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = state;
+        false
+    }
+}
+
+fn clear_cached_frame(state: &mut DemuxState) {
+    #[cfg(windows)]
+    {
+        state.cached_bgra = None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        state.cached = None;
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = state;
+    }
 }
 
 fn decode_until(
@@ -381,51 +461,79 @@ fn decode_next_video_frame(
             Ok(decoded) => decoded,
             Err(_) => continue,
         };
-        if let Some(video_frame) = vp8_to_frame(&decoded, max_size) {
-            state.last_frame_ns = timestamp_ns;
-            state.cached = Some(video_frame);
+        if store_decoded_frame(state, &decoded, timestamp_ns, max_size) {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-fn vp8_to_frame(
+fn store_decoded_frame(
+    state: &mut DemuxState,
     decoded: &oxideav_vp8::decoder::Vp8DecodedFrame,
+    timestamp_ns: u64,
     max_size: Option<(u32, u32)>,
-) -> Option<VideoFrame> {
+) -> bool {
     #[cfg(target_os = "macos")]
     {
-        return crate::webm_frame_macos::pixel_buffer_from_vp8(decoded, max_size);
+        let Some(video_frame) = crate::webm_frame_macos::pixel_buffer_from_vp8(decoded, max_size)
+        else {
+            return false;
+        };
+        state.last_frame_ns = timestamp_ns;
+        state.cached = Some(video_frame);
+        return true;
     }
     #[cfg(windows)]
     {
-        let mut bgra = crate::frame_util::i420_to_bgra(
-            decoded.width,
-            decoded.height,
-            &decoded.y,
-            &decoded.u,
-            &decoded.v,
-        )?;
-        let (width, height) = match max_size {
-            Some((max_w, max_h)) if max_w > 0 && max_h > 0 => {
-                let max_w = max_w.min(decoded.width);
-                let max_h = max_h.min(decoded.height);
-                if decoded.width <= max_w && decoded.height <= max_h {
-                    (decoded.width, decoded.height)
-                } else {
-                    let scale = (max_w as f32 / decoded.width as f32)
-                        .min(max_h as f32 / decoded.height as f32);
-                    let out_w = ((decoded.width as f32 * scale).round() as u32).max(1);
-                    let out_h = ((decoded.height as f32 * scale).round() as u32).max(1);
-                    bgra = scale_bgra(&bgra, decoded.width, decoded.height, out_w, out_h)?;
-                    (out_w, out_h)
-                }
-            }
-            _ => (decoded.width, decoded.height),
+        let Some(cached) = vp8_to_bgra(decoded, max_size) else {
+            return false;
         };
-        crate::render_frame::bgra_to_frame(width, height, bgra)
+        state.last_frame_ns = timestamp_ns;
+        state.cached_bgra = Some(cached);
+        return true;
     }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = (state, decoded, timestamp_ns, max_size);
+        false
+    }
+}
+
+#[cfg(windows)]
+fn vp8_to_bgra(
+    decoded: &oxideav_vp8::decoder::Vp8DecodedFrame,
+    max_size: Option<(u32, u32)>,
+) -> Option<CachedBgra> {
+    let mut bgra = crate::frame_util::i420_to_bgra(
+        decoded.width,
+        decoded.height,
+        &decoded.y,
+        &decoded.u,
+        &decoded.v,
+    )?;
+    let (width, height) = match max_size {
+        Some((max_w, max_h)) if max_w > 0 && max_h > 0 => {
+            let max_w = max_w.min(decoded.width);
+            let max_h = max_h.min(decoded.height);
+            if decoded.width <= max_w && decoded.height <= max_h {
+                (decoded.width, decoded.height)
+            } else {
+                let scale =
+                    (max_w as f32 / decoded.width as f32).min(max_h as f32 / decoded.height as f32);
+                let out_w = ((decoded.width as f32 * scale).round() as u32).max(1);
+                let out_h = ((decoded.height as f32 * scale).round() as u32).max(1);
+                bgra = scale_bgra(&bgra, decoded.width, decoded.height, out_w, out_h)?;
+                (out_w, out_h)
+            }
+        }
+        _ => (decoded.width, decoded.height),
+    };
+    Some(CachedBgra {
+        width,
+        height,
+        bgra,
+    })
 }
 
 #[cfg(windows)]
