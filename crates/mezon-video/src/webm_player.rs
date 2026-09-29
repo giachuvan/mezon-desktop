@@ -55,7 +55,7 @@ impl WebmPlayerImpl {
         }
         let bytes = load_bytes(url)?;
         let cursor = Cursor::new(bytes);
-        let demuxer = MatroskaFile::open(cursor).map_err(|error| {
+        let mut demuxer = MatroskaFile::open(cursor).map_err(|error| {
             tracing::warn!(target: "mezon_video", ?error, "webm demuxer open failed");
             PlayerError::Open
         })?;
