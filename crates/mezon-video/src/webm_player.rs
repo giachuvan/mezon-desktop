@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -253,12 +253,11 @@ fn load_bytes(url: &str) -> Result<Vec<u8>, PlayerError> {
             tracing::warn!(target: "mezon_video", ?error, "webm download failed");
             PlayerError::Open
         })?;
-        let mut body = Vec::new();
-        response
+        let body = response
             .body_mut()
             .with_config()
-            .limit(MAX_WEBM_BYTES)
-            .read_to_end(&mut body)
+            .limit(MAX_WEBM_BYTES as u64)
+            .read_to_vec()
             .map_err(|_| PlayerError::Open)?;
         Ok(body)
     } else if let Some(path) = url.strip_prefix("file://") {
