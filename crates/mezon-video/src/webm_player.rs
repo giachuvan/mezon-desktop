@@ -164,21 +164,17 @@ impl WebmPlayerImpl {
             self.play_offset_ns.load(Ordering::SeqCst)
         };
         let mut state = self.state.lock();
-        let before_ns = state.last_frame_ns;
-        let before_eos = state.eos;
         if playing && !state.eos {
             let _ = advance_to(&mut state, target_ns, self.max_size);
         }
         let frame = take_frame(&mut state);
-        if frame.is_some() || state.eos != before_eos || state.last_frame_ns != before_ns {
-            tracing::debug!(
+        if frame.is_some() {
+            tracing::info!(
                 target: "mezon_video",
-                playing,
-                target_ns,
-                last_frame_ns = state.last_frame_ns,
+                target_ms = target_ns / 1_000_000,
+                last_frame_ms = state.last_frame_ns / 1_000_000,
                 eos = state.eos,
-                emitted = frame.is_some(),
-                "webm copy_frame"
+                "webm frame emit"
             );
         }
         frame
@@ -447,15 +443,6 @@ fn advance_to(
     if state.eos {
         return Ok(has_cached_frame(state));
     }
-    if state.last_frame_ns > target_ns {
-        let seek_ts = target_ns / state.timestamp_scale.max(1);
-        state.demuxer.seek(seek_ts)?;
-        state.vp8 = Vp8DecoderState::new();
-        state.last_frame_ns = 0;
-        state.last_emitted_ns = None;
-        clear_cached_frame(state);
-        state.eos = false;
-    }
     while state.last_frame_ns <= target_ns {
         if !decode_next_video_frame(state, max_size)? {
             state.eos = true;
@@ -478,21 +465,6 @@ fn has_cached_frame(state: &DemuxState) -> bool {
     {
         let _ = state;
         false
-    }
-}
-
-fn clear_cached_frame(state: &mut DemuxState) {
-    #[cfg(windows)]
-    {
-        state.cached_bgra = None;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        state.cached = None;
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        let _ = state;
     }
 }
 

@@ -59,3 +59,4 @@ windows = { workspace = true, features = [
 
 [dev-dependencies]
 matroska-demuxer = "0.7"
+oxideav-vp8 = "0.2"
