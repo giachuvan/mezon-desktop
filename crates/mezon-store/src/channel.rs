@@ -30,7 +30,7 @@ use crate::permissions::{
     PERMISSION_MANAGE_CLAN, PermissionStore,
 };
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
-use crate::text_utils::normalize_diacritics;
+use crate::text_utils::{VietnameseSortKey, vietnamese_sort_key};
 use crate::threads::CHANNEL_TYPE_THREAD;
 
 pub const FAVOR_CATE_ID: &str = "favorCate";
@@ -3669,6 +3669,9 @@ impl ChannelList {
                         break;
                     }
                 }
+                if changed && label.is_some() {
+                    self.invalidate_channel_index(clan_id);
+                }
                 if changed {
                     cx.notify();
                 }
@@ -4383,6 +4386,7 @@ impl ChannelList {
     fn resort_thread_block_for(&mut self, clan_id: ClanId, channel_id: ChannelId) {
         if let Some(categories) = self.cache.get_mut(&clan_id) {
             resort_thread_block(categories, channel_id);
+            self.invalidate_channel_index(clan_id);
         }
     }
 
@@ -5797,10 +5801,8 @@ fn assemble_with_favorites(mut categories: Vec<Category>, clan_id: ClanId) -> Ve
     categories
 }
 
-/// Sort key for a thread row in the sidebar: accent-folded, lower-cased label,
-/// tie-broken by id so equal labels keep a stable order.
-fn thread_sort_key(ch: &Channel) -> (String, ChannelId) {
-    (normalize_diacritics(&ch.name), ch.id)
+fn thread_sort_key(ch: &Channel) -> (VietnameseSortKey, ChannelId) {
+    (vietnamese_sort_key(&ch.name), ch.id)
 }
 
 /// Half-open range of the contiguous rows belonging to `parent_id`'s thread block.
@@ -8193,24 +8195,74 @@ mod tests {
         assert_eq!(names, vec!["parent", "alpha", "mike", "zulu"]);
     }
 
-    #[test]
-    fn build_categories_thread_sort_is_case_and_accent_insensitive() {
+    fn sorted_thread_names(names: &[&str]) -> Vec<String> {
         let api_cats = vec![ApiCategoryDesc {
             category_id: 1,
             category_name: "General".into(),
             clan_id: 1,
             category_order: 0,
         }];
-        let mut da_nang = make_thread(11, 10, "1");
-        da_nang.name = "Đà Nẵng".into();
-        let mut zebra = make_thread(12, 10, "1");
-        zebra.name = "zebra".into();
-        let mut echo = make_thread(13, 10, "1");
-        echo.name = "Echo".into();
-        let mut channels = vec![make_channel(10, "parent", "1"), zebra, echo, da_nang];
+        let mut channels = vec![make_channel(10, "parent", "1")];
+        for (index, name) in names.iter().enumerate() {
+            let mut thread = make_thread(11 + index as i64, 10, "1");
+            thread.name = (*name).into();
+            channels.push(thread);
+        }
         let cats = build_categories(api_cats, &mut channels);
-        let names: Vec<&str> = cats[0].channels.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["parent", "Đà Nẵng", "Echo", "zebra"]);
+        cats[0].channels[1..]
+            .iter()
+            .map(|c| c.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn threads_sort_icons_then_numbers_then_lowercase_then_uppercase() {
+        assert_eq!(
+            sorted_thread_names(&[
+                "channelmessage",
+                "desktop-rust",
+                "Events",
+                "rules",
+                "ui-adjustment",
+                "webhook-github",
+                "📅 daily",
+                "123 release",
+            ]),
+            vec![
+                "📅 daily",
+                "123 release",
+                "channelmessage",
+                "desktop-rust",
+                "rules",
+                "ui-adjustment",
+                "webhook-github",
+                "Events",
+            ]
+        );
+    }
+
+    #[test]
+    fn threads_sort_by_the_vietnamese_alphabet() {
+        assert_eq!(
+            sorted_thread_names(&[
+                "đá", "dê", "ân", "ăn", "an", "ơi", "ôm", "om", "ưu", "uống", "ê", "e",
+            ]),
+            vec![
+                "an", "ăn", "ân", "dê", "đá", "e", "ê", "om", "ôm", "ơi", "uống", "ưu",
+            ]
+        );
+        assert_eq!(
+            sorted_thread_names(&["Echo", "Đà Nẵng", "Dê"]),
+            vec!["Dê", "Đà Nẵng", "Echo"]
+        );
+    }
+
+    #[test]
+    fn threads_with_the_same_letters_sort_by_tone() {
+        assert_eq!(
+            sorted_thread_names(&["bạn", "bán", "bàn", "ban", "bản", "bãn", "bác"]),
+            vec!["bác", "ban", "bàn", "bản", "bãn", "bán", "bạn"]
+        );
     }
 
     #[test]
@@ -8238,6 +8290,47 @@ mod tests {
 
         let names: Vec<&str> = cats[0].channels.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["parent", "alpha", "mike", "zulu", "later"]);
+    }
+
+    #[test]
+    fn a_new_thread_lands_in_its_vietnamese_alphabet_slot() {
+        let thread = |id: i64, name: &str| {
+            let mut thread = make_thread(id, 10, "cat1");
+            thread.name = name.into();
+            thread
+        };
+        let mut cats = vec![Category {
+            id: "cat1".into(),
+            clan_id: ClanId(1),
+            name: "General".into(),
+            order: 0,
+            channels: vec![
+                make_channel(10, "parent", "cat1"),
+                thread(15, "📅 daily"),
+                thread(16, "channelmessage"),
+                thread(17, "Events"),
+                make_channel(50, "later", "cat1"),
+            ],
+        }];
+
+        assert!(insert_channel(&mut cats, thread(90, "đổi tên")));
+        assert!(insert_channel(&mut cats, thread(91, "7 ngày")));
+        assert!(insert_channel(&mut cats, thread(92, "Ăn trưa")));
+
+        let names: Vec<&str> = cats[0].channels.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "parent",
+                "📅 daily",
+                "7 ngày",
+                "channelmessage",
+                "đổi tên",
+                "Ăn trưa",
+                "Events",
+                "later",
+            ]
+        );
     }
 
     #[test]
@@ -13409,6 +13502,148 @@ mod tests {
 
                 assert_eq!(drawn_rows(channels), vec![1, 42, 41, 2, 3]);
                 assert_eq!(row_order(channels, &category_key()), vec![1, 2, 3]);
+            });
+        });
+    }
+
+    fn structure_with_threads(threads: &[(i64, &str)]) -> Vec<Category> {
+        let api_cats = vec![ApiCategoryDesc {
+            category_id: 1,
+            category_name: "General".into(),
+            clan_id: 1,
+            category_order: 0,
+        }];
+        let mut rows = vec![make_channel(1, "mezon", "1")];
+        for (id, name) in threads {
+            let mut thread = make_channel(*id, name, "1");
+            thread.parent_id = Some(ChannelId(1));
+            rows.push(thread);
+        }
+        build_categories(api_cats, &mut rows)
+    }
+
+    fn found_ids(channels: &ChannelList, ids: &[i64]) -> Vec<Option<i64>> {
+        ids.iter()
+            .map(|id| {
+                channels
+                    .channel(ClanId(1), ChannelId(*id))
+                    .map(|channel| channel.id.get())
+            })
+            .collect()
+    }
+
+    #[gpui::test]
+    fn a_thread_renamed_by_someone_else_is_still_found_where_it_moved(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                let threads = [(41, "alpha"), (42, "mike"), (43, "zulu")];
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_threads(&threads),
+                    None,
+                    cx,
+                );
+                assert_eq!(
+                    found_ids(channels, &[41, 42, 43]),
+                    vec![Some(41), Some(42), Some(43)]
+                );
+
+                channels.handle_event(
+                    &RealtimeEvent::ChannelUpdated(mezon_proto::realtime::ChannelUpdatedEvent {
+                        clan_id: 1,
+                        channel_id: 41,
+                        channel_label: "Zeta".into(),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+
+                assert_eq!(drawn_rows(channels), vec![1, 42, 43, 41]);
+                assert_eq!(
+                    found_ids(channels, &[41, 42, 43]),
+                    vec![Some(41), Some(42), Some(43)]
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_thread_renamed_on_reactivation_is_still_found_where_it_moved(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                let threads = [(41, "events"), (42, "mike"), (43, "zulu")];
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_threads(&threads),
+                    None,
+                    cx,
+                );
+                assert_eq!(
+                    found_ids(channels, &[41, 42, 43]),
+                    vec![Some(41), Some(42), Some(43)]
+                );
+
+                channels.ensure_thread_with_parent_active(
+                    ChannelId(41),
+                    ChannelId(1),
+                    ClanId(1),
+                    "Events".into(),
+                    CHANNEL_ACTIVE_JOINED,
+                    true,
+                    None,
+                    cx,
+                );
+
+                assert_eq!(drawn_rows(channels), vec![1, 42, 43, 41]);
+                assert_eq!(
+                    found_ids(channels, &[41, 42, 43]),
+                    vec![Some(41), Some(42), Some(43)]
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn dragged_threads_keep_their_order_and_new_ones_follow_in_vietnamese_order(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let structure = structure_with_threads;
+        let dragged = [(41, "rules"), (42, "channelmessage"), (43, "Events")];
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure(&dragged), None, cx);
+                assert_eq!(drawn_rows(channels), vec![1, 42, 41, 43]);
+
+                channels.move_sidebar_row(
+                    SidebarOrderKey::Threads(ChannelId(1)),
+                    ChannelId(43),
+                    ChannelId(42),
+                    cx,
+                );
+                assert_eq!(drawn_rows(channels), vec![1, 43, 42, 41]);
+
+                let with_new_threads = [
+                    dragged[0],
+                    dragged[1],
+                    dragged[2],
+                    (44, "đổi tên"),
+                    (45, "📅 daily"),
+                    (46, "Ăn trưa"),
+                ];
+                channels.apply_clan_structure(ClanId(1), structure(&with_new_threads), None, cx);
+                assert_eq!(drawn_rows(channels), vec![1, 43, 42, 41, 45, 44, 46]);
+
+                let mut renamed = with_new_threads;
+                renamed[2] = (43, "zzz");
+                channels.apply_clan_structure(ClanId(1), structure(&renamed), None, cx);
+                assert_eq!(drawn_rows(channels), vec![1, 43, 42, 41, 45, 44, 46]);
             });
         });
     }

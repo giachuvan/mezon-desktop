@@ -1292,6 +1292,15 @@ impl CallStore {
         let caller_id = self.self_id;
         cx.background_executor()
             .spawn(async move {
+                let is_sdp = matches!(data_type, WEBRTC_SDP_OFFER | WEBRTC_SDP_ANSWER);
+                if is_sdp {
+                    tracing::info!(
+                        data_type,
+                        receiver_id,
+                        channel_id,
+                        "call: forwarding local SDP"
+                    );
+                }
                 if let Err(e) = api
                     .forward_webrtc_signaling(
                         receiver_id,
@@ -1304,6 +1313,13 @@ impl CallStore {
                 {
                     tracing::warn!(
                         "call: signaling send failed type={data_type} to={receiver_id}: {e:#}"
+                    );
+                } else if is_sdp {
+                    tracing::info!(
+                        data_type,
+                        receiver_id,
+                        channel_id,
+                        "call: local SDP acknowledged by signaling server"
                     );
                 }
             })
