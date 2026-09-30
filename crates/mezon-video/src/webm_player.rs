@@ -95,7 +95,19 @@ impl WebmPlayerImpl {
                 PlayerError::Open
             })?;
         let timestamp_scale = demuxer.info().timestamp_scale().get();
-        let duration_seconds = video_duration_seconds(&mut demuxer, video_track, timestamp_scale)?;
+        let header_duration = header_duration_seconds(demuxer.info());
+        let duration_seconds = if let Some(duration) = header_duration {
+            duration
+        } else {
+            video_duration_from_frames(&mut demuxer, video_track, timestamp_scale)?
+        };
+        tracing::info!(
+            target: "mezon_video",
+            timestamp_scale,
+            header_duration,
+            duration_seconds,
+            "webm opened"
+        );
         let mut state = DemuxState {
             demuxer,
             video_track,
@@ -110,8 +122,22 @@ impl WebmPlayerImpl {
             eos: false,
         };
         if !decode_until(&mut state, 0, max_size)? {
+            tracing::warn!(target: "mezon_video", "webm failed to decode first frame");
             return Err(PlayerError::Open);
         }
+        #[cfg(windows)]
+        let first = state
+            .cached_bgra
+            .as_ref()
+            .map(|frame| (frame.width, frame.height));
+        #[cfg(target_os = "macos")]
+        let first = state.cached.as_ref().map(|_| (0u32, 0u32));
+        tracing::info!(
+            target: "mezon_video",
+            ?first,
+            last_frame_ns = state.last_frame_ns,
+            "webm first frame ready"
+        );
         Ok(Self {
             state: Mutex::new(state),
             duration_seconds,
@@ -138,10 +164,24 @@ impl WebmPlayerImpl {
             self.play_offset_ns.load(Ordering::SeqCst)
         };
         let mut state = self.state.lock();
+        let before_ns = state.last_frame_ns;
+        let before_eos = state.eos;
         if playing && !state.eos {
             let _ = advance_to(&mut state, target_ns, self.max_size);
         }
-        take_frame(&mut state)
+        let frame = take_frame(&mut state);
+        if frame.is_some() || state.eos != before_eos || state.last_frame_ns != before_ns {
+            tracing::debug!(
+                target: "mezon_video",
+                playing,
+                target_ns,
+                last_frame_ns = state.last_frame_ns,
+                eos = state.eos,
+                emitted = frame.is_some(),
+                "webm copy_frame"
+            );
+        }
+        frame
     }
 
     pub fn play(&self) {
@@ -150,6 +190,12 @@ impl WebmPlayerImpl {
         }
         if !self.playing.swap(true, Ordering::SeqCst) {
             *self.play_started_at.lock() = Some(Instant::now());
+            tracing::info!(
+                target: "mezon_video",
+                duration = self.duration_seconds,
+                offset_ns = self.play_offset_ns.load(Ordering::SeqCst),
+                "webm play"
+            );
         }
     }
 
@@ -158,6 +204,12 @@ impl WebmPlayerImpl {
             self.play_offset_ns
                 .fetch_add(self.elapsed_ns(), Ordering::SeqCst);
             *self.play_started_at.lock() = None;
+            tracing::info!(
+                target: "mezon_video",
+                current = self.current_time(),
+                duration = self.duration_seconds,
+                "webm pause"
+            );
         }
     }
 
@@ -294,23 +346,24 @@ pub fn probe_webm(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
     None
 }
 
-fn video_duration_seconds(
+fn header_duration_seconds(info: &matroska_demuxer::Info) -> Option<f64> {
+    let ticks = info.duration()?;
+    let scale = info.timestamp_scale().get() as f64;
+    let seconds = ticks * scale / 1_000_000_000.0;
+    (seconds.is_finite() && seconds > 0.05).then_some(seconds)
+}
+
+fn video_duration_from_frames(
     demuxer: &mut MatroskaFile<Cursor<Vec<u8>>>,
     video_track: u64,
     timestamp_scale: u64,
 ) -> Result<f64, PlayerError> {
-    if let Some(duration) = demuxer
-        .info()
-        .duration()
-        .map(|ns| ns / 1_000_000_000.0)
-        .filter(|value| value.is_finite() && *value > 0.0)
-    {
-        return Ok(duration);
-    }
     let mut frame = Frame::default();
     let mut max_ns = 0u64;
+    let mut video_frames = 0u32;
     while demuxer.next_frame(&mut frame).ok() == Some(true) {
         if frame.track == video_track {
+            video_frames += 1;
             max_ns = max_ns.max(frame.timestamp.saturating_mul(timestamp_scale));
         }
     }
@@ -319,6 +372,13 @@ fn video_duration_seconds(
     } else {
         0.0
     };
+    tracing::info!(
+        target: "mezon_video",
+        video_frames,
+        max_ns,
+        duration,
+        "webm duration scanned from frames"
+    );
     demuxer.seek(0).map_err(|error| {
         tracing::warn!(target: "mezon_video", ?error, "webm duration seek reset failed");
         PlayerError::Open

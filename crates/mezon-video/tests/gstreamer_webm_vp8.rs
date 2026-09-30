@@ -56,6 +56,18 @@ fn gstreamer_muxed_webm_duration_from_frame_timestamps() {
         .track_number()
         .get();
     let timestamp_scale = demuxer.info().timestamp_scale().get();
+    if let Some(ticks) = demuxer.info().duration() {
+        let header_seconds = ticks * timestamp_scale as f64 / 1_000_000_000.0;
+        let wrong_divide_by_1e9 = ticks / 1_000_000_000.0;
+        assert!(
+            header_seconds > 5.0,
+            "header duration ticks={ticks} scale={timestamp_scale} => {header_seconds}s"
+        );
+        assert!(
+            wrong_divide_by_1e9 < 0.05,
+            "ticks are NOT nanoseconds; dividing by 1e9 wrongly yields {wrong_divide_by_1e9}"
+        );
+    }
     let mut frame = matroska_demuxer::Frame::default();
     let mut max_ns = 0u64;
     while demuxer.next_frame(&mut frame).ok() == Some(true) {

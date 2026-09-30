@@ -169,13 +169,26 @@ impl VideoPlayerView {
         self._open_task = None;
         match opened {
             Ok(player) => {
+                let duration = player.duration();
                 let player = Rc::new(player);
                 player.play();
+                tracing::info!(
+                    target: "mezon_video",
+                    url = %self.url,
+                    duration,
+                    "video player ready"
+                );
                 self.player = Some(player);
                 self.load_state = VideoLoadState::Ready;
                 self.shared.borrow_mut().playing = true;
             }
-            Err(_) => {
+            Err(error) => {
+                tracing::warn!(
+                    target: "mezon_video",
+                    url = %self.url,
+                    %error,
+                    "video player open failed"
+                );
                 self.load_state = VideoLoadState::Failed;
             }
         }
@@ -274,10 +287,17 @@ impl VideoPlayerView {
         let muted = player.is_muted();
         let failed = player.failed();
         if playing && duration > 0.0 && current_time >= duration - STUCK_PLAYING_END_SECONDS {
+            tracing::info!(
+                target: "mezon_video",
+                current_time,
+                duration,
+                "video auto-pause at end"
+            );
             player.pause();
             playing = false;
         }
         let new_frame = if playing { player.copy_frame() } else { None };
+        let emitted = new_frame.is_some();
         let new_frame = new_frame.map(|frame| Self::adopt_frame(&self.shared, frame, window, cx));
         let previous = {
             let mut shared = self.shared.borrow_mut();
@@ -290,6 +310,15 @@ impl VideoPlayerView {
         };
         Self::release_stale_frame(previous, &self.shared, window, cx);
         self.refresh_time_label(playing, current_time, duration);
+        if emitted {
+            tracing::debug!(
+                target: "mezon_video",
+                current_time,
+                duration,
+                playing,
+                "video frame adopted"
+            );
+        }
         if was_playing && !playing {
             cx.notify();
         }
@@ -533,6 +562,10 @@ impl VideoPlayerView {
                     rebranded
                 }
                 Err(still_shared) => {
+                    tracing::warn!(
+                        target: "mezon_video",
+                        "video adopt_frame try_unwrap failed — texture will not update"
+                    );
                     shared.borrow_mut().stream_image_id = Some(still_shared.id);
                     still_shared
                 }
