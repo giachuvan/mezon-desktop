@@ -1,4 +1,5 @@
 use std::io::Cursor;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -51,6 +52,7 @@ unsafe impl Send for DemuxState {}
 
 pub struct WebmPlayerImpl {
     state: Mutex<DemuxState>,
+    bytes: Arc<Vec<u8>>,
     duration_seconds: f64,
     playing: AtomicBool,
     play_started_at: Mutex<Option<Instant>>,
@@ -70,11 +72,8 @@ impl WebmPlayerImpl {
     }
 
     pub fn open_bytes(bytes: Vec<u8>, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
-        let cursor = Cursor::new(bytes);
-        let mut demuxer = MatroskaFile::open(cursor).map_err(|error| {
-            tracing::warn!(target: "mezon_video", ?error, "webm demuxer open failed");
-            PlayerError::Open
-        })?;
+        let bytes = Arc::new(bytes);
+        let mut demuxer = open_demuxer(&bytes)?;
         let video_track = demuxer
             .tracks()
             .iter()
@@ -99,7 +98,9 @@ impl WebmPlayerImpl {
         let duration_seconds = if let Some(duration) = header_duration {
             duration
         } else {
-            video_duration_from_frames(&mut demuxer, video_track, timestamp_scale)?
+            let duration = video_duration_from_frames(&mut demuxer, video_track, timestamp_scale)?;
+            demuxer = open_demuxer(&bytes)?;
+            duration
         };
         tracing::info!(
             target: "mezon_video",
@@ -140,6 +141,7 @@ impl WebmPlayerImpl {
         );
         Ok(Self {
             state: Mutex::new(state),
+            bytes,
             duration_seconds,
             playing: AtomicBool::new(false),
             play_started_at: Mutex::new(None),
@@ -242,26 +244,22 @@ impl WebmPlayerImpl {
         *self.play_started_at.lock() = None;
         self.play_offset_ns.store(target_ns, Ordering::SeqCst);
         let mut state = self.state.lock();
-        state.vp8 = Vp8DecoderState::new();
-        state.last_frame_ns = 0;
-        state.last_emitted_ns = None;
-        #[cfg(windows)]
-        {
-            state.cached_bgra = None;
-        }
-        #[cfg(target_os = "macos")]
-        {
-            state.cached = None;
-        }
-        state.eos = false;
-        let seek_ts = target_ns / state.timestamp_scale.max(1);
-        if state.demuxer.seek(seek_ts).is_err() {
+        if reopen_at(&mut state, &self.bytes, target_ns, self.max_size).is_err() {
+            tracing::warn!(
+                target: "mezon_video",
+                target_ms = target_ns / 1_000_000,
+                "webm seek reopen failed"
+            );
             self.failed.store(true, Ordering::SeqCst);
             return;
         }
-        if advance_to(&mut state, target_ns, self.max_size).is_err() {
-            self.failed.store(true, Ordering::SeqCst);
-        }
+        tracing::info!(
+            target: "mezon_video",
+            target_ms = target_ns / 1_000_000,
+            last_frame_ms = state.last_frame_ns / 1_000_000,
+            eos = state.eos,
+            "webm seek reopen ready"
+        );
     }
 
     pub fn set_volume(&self, volume: f32) {
@@ -342,6 +340,47 @@ pub fn probe_webm(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
     None
 }
 
+fn open_demuxer(bytes: &Arc<Vec<u8>>) -> Result<MatroskaFile<Cursor<Vec<u8>>>, PlayerError> {
+    MatroskaFile::open(Cursor::new(Vec::clone(bytes))).map_err(|error| {
+        tracing::warn!(target: "mezon_video", ?error, "webm demuxer open failed");
+        PlayerError::Open
+    })
+}
+
+fn clear_frame_cache(state: &mut DemuxState) {
+    state.vp8 = Vp8DecoderState::new();
+    state.last_frame_ns = 0;
+    state.last_emitted_ns = None;
+    #[cfg(windows)]
+    {
+        state.cached_bgra = None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        state.cached = None;
+    }
+    state.eos = false;
+}
+
+fn reopen_at(
+    state: &mut DemuxState,
+    bytes: &Arc<Vec<u8>>,
+    target_ns: u64,
+    max_size: Option<(u32, u32)>,
+) -> Result<(), PlayerError> {
+    state.demuxer = open_demuxer(bytes)?;
+    clear_frame_cache(state);
+    if !decode_until(state, target_ns, max_size)? {
+        tracing::warn!(
+            target: "mezon_video",
+            target_ms = target_ns / 1_000_000,
+            "webm reopen produced no frame"
+        );
+        return Err(PlayerError::Open);
+    }
+    Ok(())
+}
+
 fn header_duration_seconds(info: &matroska_demuxer::Info) -> Option<f64> {
     let ticks = info.duration()?;
     let scale = info.timestamp_scale().get() as f64;
@@ -375,10 +414,6 @@ fn video_duration_from_frames(
         duration,
         "webm duration scanned from frames"
     );
-    demuxer.seek(0).map_err(|error| {
-        tracing::warn!(target: "mezon_video", ?error, "webm duration seek reset failed");
-        PlayerError::Open
-    })?;
     Ok(duration)
 }
 

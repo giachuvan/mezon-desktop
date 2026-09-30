@@ -141,3 +141,59 @@ fn decode_many_vp8_frames_from_fixture() {
         "expected many decoded frames, got ok={ok} err={err}; {log}"
     );
 }
+
+#[test]
+fn seek_to_start_after_eos_yields_no_frames() {
+    let Some(path) = fixture_path() else {
+        return;
+    };
+    let bytes = std::fs::read(path).expect("read fixture");
+    let mut demuxer = MatroskaFile::open(Cursor::new(bytes)).expect("open demuxer");
+    let mut frame = matroska_demuxer::Frame::default();
+    while demuxer.next_frame(&mut frame).ok() == Some(true) {}
+    demuxer.seek(0).expect("seek to start after eos");
+    let mut count = 0u32;
+    while demuxer.next_frame(&mut frame).ok() == Some(true) {
+        count += 1;
+    }
+    assert_eq!(
+        count, 0,
+        "matroska-demuxer seek(0) after EOS is a no-op without cues"
+    );
+}
+
+#[test]
+fn reopen_after_eos_still_decodes() {
+    use oxideav_vp8::state::Vp8DecoderState;
+    let Some(path) = fixture_path() else {
+        return;
+    };
+    let bytes = std::fs::read(path).expect("read fixture");
+    let mut demuxer = MatroskaFile::open(Cursor::new(bytes.clone())).expect("open demuxer");
+    let video_track = demuxer
+        .tracks()
+        .iter()
+        .find(|track| is_vp8_video_track(track))
+        .expect("video track")
+        .track_number()
+        .get();
+    let mut frame = matroska_demuxer::Frame::default();
+    while demuxer.next_frame(&mut frame).ok() == Some(true) {}
+    demuxer = MatroskaFile::open(Cursor::new(bytes)).expect("reopen demuxer");
+    let mut vp8 = Vp8DecoderState::new();
+    let mut ok = 0u32;
+    let mut err = 0u32;
+    while demuxer.next_frame(&mut frame).ok() == Some(true) {
+        if frame.track != video_track {
+            continue;
+        }
+        match vp8.decode_frame(&frame.data) {
+            Ok(_) => ok += 1,
+            Err(_) => err += 1,
+        }
+    }
+    assert!(
+        ok > 10,
+        "after reopen expected many frames, ok={ok} err={err}"
+    );
+}
