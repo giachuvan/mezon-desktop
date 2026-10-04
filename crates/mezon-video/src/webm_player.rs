@@ -59,6 +59,7 @@ struct DemuxState {
     last_frame_ns: u64,
     last_emitted_ns: Option<u64>,
     raw: Option<RawI420>,
+    pending: Option<(u64, RawI420)>,
     #[cfg(windows)]
     cached_bgra: Option<CachedBgra>,
     #[cfg(target_os = "macos")]
@@ -126,6 +127,7 @@ impl WebmPlayerImpl {
             last_frame_ns: 0,
             last_emitted_ns: None,
             raw: None,
+            pending: None,
             #[cfg(windows)]
             cached_bgra: None,
             #[cfg(target_os = "macos")]
@@ -163,7 +165,11 @@ impl WebmPlayerImpl {
         };
         let mut state = self.state.lock();
         if playing && !state.eos {
-            let _ = advance_to(&mut state, target_ns, self.max_size);
+            if let Err(error) = advance_to(&mut state, target_ns, self.max_size) {
+                tracing::warn!(target: "mezon_video", ?error, "webm play advance failed");
+                self.failed.store(true, Ordering::SeqCst);
+                return None;
+            }
         }
         take_frame(&mut state)
     }
@@ -333,6 +339,7 @@ fn clear_frame_cache(state: &mut DemuxState) {
     state.last_frame_ns = 0;
     state.last_emitted_ns = None;
     state.raw = None;
+    state.pending = None;
     #[cfg(windows)]
     {
         state.cached_bgra = None;
@@ -472,13 +479,18 @@ fn advance_to(
         return Ok(present_raw(state, max_size));
     }
     loop {
-        match decode_next_shown_planes(state)? {
+        let next = match state.pending.take() {
+            Some(pending) => Some(pending),
+            None => decode_next_shown_planes(state)?,
+        };
+        match next {
             None => {
                 state.eos = true;
                 break;
             }
             Some((timestamp_ns, raw)) => {
                 if timestamp_ns > target_ns && state.raw.is_some() {
+                    state.pending = Some((timestamp_ns, raw));
                     break;
                 }
                 state.last_frame_ns = timestamp_ns;
