@@ -220,7 +220,7 @@ impl WebmPlayerImpl {
         let mut state = self.state.lock();
         let can_advance = !state.eos && state.raw.is_some() && target_ns >= state.last_frame_ns;
         let seek_result = if can_advance {
-            decode_until(&mut state, target_ns, self.max_size)
+            decode_until(&mut state, target_ns, self.max_size).map(|_| ())
         } else {
             reopen_at(&mut state, &self.bytes, target_ns, self.max_size)
         };
