@@ -153,9 +153,7 @@ impl PlayerImpl {
             .seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE, position)
         {
             tracing::warn!(target: "mezon_video", %error, "gstreamer seek failed");
-            return;
         }
-        let _ = self.playbin.state(Some(gst::ClockTime::from_mseconds(500)));
     }
 
     pub fn set_volume(&self, volume: f32) {

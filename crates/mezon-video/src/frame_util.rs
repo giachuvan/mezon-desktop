@@ -95,9 +95,33 @@ pub(crate) fn i420_to_bgra(
         return None;
     }
     let mut bgra = vec![0u8; w * h * 4];
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        let planar = yuv::YuvPlanarImage {
+            y_plane: y,
+            y_stride: w as u32,
+            u_plane: u,
+            u_stride: uv_w as u32,
+            v_plane: v,
+            v_stride: uv_w as u32,
+            width,
+            height,
+        };
+        if yuv::yuv420_to_bgra(
+            &planar,
+            &mut bgra,
+            (w * 4) as u32,
+            yuv::YuvRange::Limited,
+            yuv::YuvStandardMatrix::Bt601,
+        )
+        .is_ok()
+        {
+            return Some(bgra);
+        }
+    }
     for row in 0..h {
         for col in 0..w {
-            let y_val = i32::from(y[row * w + col]);
+            let y_val = ((i32::from(y[row * w + col]) - 16) * 255) / 219;
             let u_val = i32::from(u[(row / 2) * uv_w + col / 2]) - 128;
             let v_val = i32::from(v[(row / 2) * uv_w + col / 2]) - 128;
             let r = (y_val + ((1436 * v_val) >> 10)).clamp(0, 255) as u8;

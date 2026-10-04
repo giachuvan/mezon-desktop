@@ -117,7 +117,7 @@ fn seconds_to_cm_time(seconds: f64) -> CmTime {
 
 enum PlayerBackend {
     AvFoundation(AvFoundationPlayer),
-    Webm(crate::webm_player::WebmPlayerImpl),
+    Webm(Box<crate::webm_player::WebmPlayerImpl>),
 }
 
 pub struct PlayerImpl {
@@ -138,25 +138,30 @@ struct AvFoundationPlayer {
 impl PlayerImpl {
     pub fn open(url: &str, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
         let inner = if crate::webm_player::is_webm_source(url) {
-            PlayerBackend::Webm(crate::webm_player::WebmPlayerImpl::open(url, max_size)?)
+            PlayerBackend::Webm(Box::new(crate::webm_player::WebmPlayerImpl::open(
+                url, max_size,
+            )?))
         } else {
             PlayerBackend::AvFoundation(AvFoundationPlayer::open(url, max_size)?)
         };
         Ok(Self { inner })
     }
 
-    pub fn open_webm(bytes: Vec<u8>, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
-        Ok(Self {
-            inner: PlayerBackend::Webm(crate::webm_player::WebmPlayerImpl::open_bytes(
-                bytes, max_size,
-            )?),
-        })
-    }
-
     pub fn from_webm(player: crate::webm_player::WebmPlayerImpl) -> Self {
         Self {
-            inner: PlayerBackend::Webm(player),
+            inner: PlayerBackend::Webm(Box::new(player)),
         }
+    }
+
+    pub fn from_webm_bytes(
+        bytes: Vec<u8>,
+        max_size: Option<(u32, u32)>,
+    ) -> Result<Self, PlayerError> {
+        Ok(Self {
+            inner: PlayerBackend::Webm(Box::new(crate::webm_player::WebmPlayerImpl::open_bytes(
+                bytes, max_size,
+            )?)),
+        })
     }
 
     pub fn copy_frame(&self) -> Option<VideoFrame> {

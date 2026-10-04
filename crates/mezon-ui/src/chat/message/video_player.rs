@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, DragMoveEvent, Empty, Entity, EntityId,
@@ -17,6 +18,7 @@ use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
 
 const SEEK_STEP_SECONDS: f64 = 5.0;
+const SEEK_MIN_INTERVAL: Duration = Duration::from_millis(80);
 const REPLAY_THRESHOLD_SECONDS: f64 = 0.05;
 const STUCK_PLAYING_END_SECONDS: f64 = 0.02;
 const THEATER_FILL: f32 = 0.92;
@@ -117,6 +119,8 @@ pub struct VideoPlayerView {
     last_label_seconds: (u64, u64),
     image_cache: Entity<LruImageCache>,
     _open_task: Option<Task<()>>,
+    last_seek_at: Option<Instant>,
+    pending_seek: Option<f64>,
 }
 
 impl VideoPlayerView {
@@ -156,6 +160,8 @@ impl VideoPlayerView {
                 LruImageCache::message("video-poster", 2, 16 * 1024 * 1024, 16 * 1024 * 1024, cx)
             }),
             _open_task: None,
+            last_seek_at: None,
+            pending_seek: None,
         };
         view.start_open(cx);
         view
@@ -270,6 +276,8 @@ impl VideoPlayerView {
                 LruImageCache::message("video-poster", 2, 16 * 1024 * 1024, 16 * 1024 * 1024, cx)
             }),
             _open_task: None,
+            last_seek_at: None,
+            pending_seek: None,
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
@@ -277,6 +285,9 @@ impl VideoPlayerView {
     }
 
     fn poll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(target) = self.pending_seek.take() {
+            self.apply_seek_target(target, true, window, cx);
+        }
         let Some(player) = self.player.clone() else {
             return;
         };
@@ -384,6 +395,7 @@ impl VideoPlayerView {
 
     pub fn shutdown(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self._open_task = None;
+        self.pending_seek = None;
         if let Some(player) = self.player.take() {
             player.pause();
             drop(player);
@@ -443,68 +455,78 @@ impl VideoPlayerView {
     }
 
     fn seek_relative(&mut self, delta: f64, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(player) = self.player.clone() else {
-            return;
-        };
-        let was_playing = player.is_playing();
         let target = {
-            let mut shared = self.shared.borrow_mut();
+            let shared = self.shared.borrow();
             if shared.duration <= 0.0 {
                 return;
             }
-            let target = (shared.current_time + delta).clamp(0.0, shared.duration);
-            shared.current_time = target;
-            target
+            (shared.current_time + delta).clamp(0.0, shared.duration)
         };
-        player.seek(target);
-        if was_playing {
-            player.play();
-            self.shared.borrow_mut().playing = true;
-        }
-        self.apply_seeked_frame(&player, window, cx);
-        cx.notify();
+        self.apply_seek_target(target, true, window, cx);
     }
 
-    fn seek_to_x(&mut self, x: Pixels, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(player) = self.player.clone() else {
-            return;
-        };
-        let was_playing = player.is_playing();
+    fn seek_to_x(&mut self, x: Pixels, force: bool, window: &mut Window, cx: &mut Context<Self>) {
         let bounds = self.track_bounds;
         let target = {
-            let mut shared = self.shared.borrow_mut();
+            let shared = self.shared.borrow();
             if shared.duration <= 0.0 {
                 return;
             }
-            let target = fraction_from_position(bounds, x) as f64 * shared.duration;
-            shared.current_time = target;
-            target
+            fraction_from_position(bounds, x) as f64 * shared.duration
         };
-        player.seek(target);
-        if was_playing {
-            player.play();
-            self.shared.borrow_mut().playing = true;
-        }
-        self.apply_seeked_frame(&player, window, cx);
-        cx.notify();
+        self.apply_seek_target(target, force, window, cx);
     }
 
-    fn apply_seeked_frame(
+    fn apply_seek_target(
         &mut self,
-        player: &VideoPlayer,
+        target: f64,
+        force: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(frame) = player.copy_frame() else {
+        let Some(player) = self.player.clone() else {
             return;
         };
-        let frame = Self::adopt_frame(&self.shared, frame, window, cx);
-        let previous = self.shared.borrow_mut().frame.replace(frame);
-        Self::release_stale_frame(previous, &self.shared, window, cx);
+        {
+            let mut shared = self.shared.borrow_mut();
+            if shared.duration <= 0.0 {
+                return;
+            }
+            shared.current_time = target.clamp(0.0, shared.duration);
+        }
+        let now = Instant::now();
+        if !force
+            && self
+                .last_seek_at
+                .is_some_and(|prev| now.duration_since(prev) < SEEK_MIN_INTERVAL)
+        {
+            self.pending_seek = Some(target);
+            let (current_time, duration) = {
+                let shared = self.shared.borrow();
+                (shared.current_time, shared.duration)
+            };
+            self.refresh_time_label(player.is_playing(), current_time, duration);
+            cx.notify();
+            return;
+        }
+        self.last_seek_at = Some(now);
+        self.pending_seek = None;
+        let was_playing = player.is_playing();
+        player.seek(target);
+        if was_playing {
+            player.play();
+            self.shared.borrow_mut().playing = true;
+        }
+        if let Some(frame) = player.copy_frame() {
+            let frame = Self::adopt_frame(&self.shared, frame, window, cx);
+            let previous = self.shared.borrow_mut().frame.replace(frame);
+            Self::release_stale_frame(previous, &self.shared, window, cx);
+        }
         let current_time = player.current_time();
         let duration = player.duration();
         self.shared.borrow_mut().current_time = current_time;
         self.refresh_time_label(player.is_playing(), current_time, duration);
+        cx.notify();
     }
 
     fn open_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -716,7 +738,7 @@ impl VideoPlayerView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|view, event: &MouseDownEvent, window, cx| {
-                    view.seek_to_x(event.position.x, window, cx);
+                    view.seek_to_x(event.position.x, true, window, cx);
                 }),
             )
             .on_drag(SeekDrag(entity_id), |drag, _, _, cx| {
@@ -729,7 +751,7 @@ impl VideoPlayerView {
                     if *id != entity_id {
                         return;
                     }
-                    view.seek_to_x(event.event.position.x, window, cx);
+                    view.seek_to_x(event.event.position.x, false, window, cx);
                 }),
             )
             .child(
