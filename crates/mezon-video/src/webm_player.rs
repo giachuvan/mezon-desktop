@@ -11,7 +11,7 @@ use crate::{PlayerError, VideoFrame, VideoProbe};
 
 const MAX_WEBM_BYTES: usize = 64 * 1024 * 1024;
 const WEBM_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-const WEBM_HTTP_READ_TIMEOUT: Duration = Duration::from_secs(60);
+const WEBM_HTTP_RECV_BODY_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_DECODE_PIXELS: u64 = 4096 * 4096;
 
 type WebmCursor = Cursor<Arc<[u8]>>;
@@ -410,7 +410,7 @@ fn load_bytes(url: &str) -> Result<Vec<u8>, PlayerError> {
     if url.starts_with("http://") || url.starts_with("https://") {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_connect(Some(WEBM_HTTP_CONNECT_TIMEOUT))
-            .timeout_read(Some(WEBM_HTTP_READ_TIMEOUT))
+            .timeout_recv_body(Some(WEBM_HTTP_RECV_BODY_TIMEOUT))
             .build()
             .into();
         let mut response = agent.get(url).call().map_err(|error| {
