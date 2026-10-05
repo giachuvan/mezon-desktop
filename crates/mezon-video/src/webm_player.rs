@@ -10,7 +10,9 @@ use parking_lot::Mutex;
 use crate::{PlayerError, VideoFrame, VideoProbe};
 
 const MAX_WEBM_BYTES: usize = 64 * 1024 * 1024;
-const WEBM_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+const WEBM_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const WEBM_HTTP_READ_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_DECODE_PIXELS: u64 = 4096 * 4096;
 
 type WebmCursor = Cursor<Arc<[u8]>>;
 
@@ -64,6 +66,10 @@ struct DemuxState {
     cached_bgra: Option<CachedBgra>,
     #[cfg(target_os = "macos")]
     cached: Option<VideoFrame>,
+    #[cfg(target_os = "macos")]
+    pixel_pool: [Option<VideoFrame>; 2],
+    #[cfg(target_os = "macos")]
+    pixel_pool_i: usize,
     eos: bool,
 }
 
@@ -123,7 +129,7 @@ impl WebmPlayerImpl {
             demuxer,
             video_track,
             timestamp_scale,
-            vp8: Vp8DecoderState::new(),
+            vp8: Vp8DecoderState::new().with_max_pixels_per_frame(MAX_DECODE_PIXELS),
             last_frame_ns: 0,
             last_emitted_ns: None,
             raw: None,
@@ -132,6 +138,10 @@ impl WebmPlayerImpl {
             cached_bgra: None,
             #[cfg(target_os = "macos")]
             cached: None,
+            #[cfg(target_os = "macos")]
+            pixel_pool: [None, None],
+            #[cfg(target_os = "macos")]
+            pixel_pool_i: 0,
             eos: false,
         };
         if !decode_until(&mut state, 0, max_size)? {
@@ -175,7 +185,7 @@ impl WebmPlayerImpl {
     }
 
     pub fn play(&self) {
-        if self.failed.load(Ordering::SeqCst) {
+        if self.failed.load(Ordering::SeqCst) || self.duration_seconds <= 0.0 {
             return;
         }
         if !self.playing.swap(true, Ordering::SeqCst) {
@@ -196,6 +206,9 @@ impl WebmPlayerImpl {
     }
 
     pub fn current_time(&self) -> f64 {
+        if self.duration_seconds <= 0.0 {
+            return 0.0;
+        }
         let ns = if self.playing.load(Ordering::SeqCst) {
             self.play_offset_ns
                 .load(Ordering::SeqCst)
@@ -285,7 +298,7 @@ pub fn probe_webm(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
         if frame.track != video_track {
             continue;
         }
-        let mut vp8 = Vp8DecoderState::new();
+        let mut vp8 = Vp8DecoderState::new().with_max_pixels_per_frame(MAX_DECODE_PIXELS);
         let decoded = vp8.decode_frame(&frame.data).ok()?;
         if vp8.last_frame_shown() == Some(false) {
             continue;
@@ -335,7 +348,7 @@ fn open_demuxer(bytes: &Arc<[u8]>) -> Result<MatroskaFile<WebmCursor>, PlayerErr
 }
 
 fn clear_frame_cache(state: &mut DemuxState) {
-    state.vp8 = Vp8DecoderState::new();
+    state.vp8 = Vp8DecoderState::new().with_max_pixels_per_frame(MAX_DECODE_PIXELS);
     state.last_frame_ns = 0;
     state.last_emitted_ns = None;
     state.raw = None;
@@ -347,6 +360,8 @@ fn clear_frame_cache(state: &mut DemuxState) {
     #[cfg(target_os = "macos")]
     {
         state.cached = None;
+        state.pixel_pool = [None, None];
+        state.pixel_pool_i = 0;
     }
     state.eos = false;
 }
@@ -394,7 +409,8 @@ fn video_duration_from_frames(
 fn load_bytes(url: &str) -> Result<Vec<u8>, PlayerError> {
     if url.starts_with("http://") || url.starts_with("https://") {
         let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(WEBM_HTTP_TIMEOUT))
+            .timeout_connect(Some(WEBM_HTTP_CONNECT_TIMEOUT))
+            .timeout_read(Some(WEBM_HTTP_READ_TIMEOUT))
             .build()
             .into();
         let mut response = agent.get(url).call().map_err(|error| {
@@ -416,7 +432,13 @@ fn load_bytes(url: &str) -> Result<Vec<u8>, PlayerError> {
 }
 
 fn local_file_path(url: &str) -> Option<&str> {
-    let path = url.strip_prefix("file://")?;
+    let path = if let Some(path) = url.strip_prefix("file://") {
+        path
+    } else if !url.contains("://") {
+        url
+    } else {
+        return None;
+    };
     if path.starts_with("//") || path.starts_with("\\\\") {
         return None;
     }
@@ -540,12 +562,33 @@ fn present_raw(state: &mut DemuxState, max_size: Option<(u32, u32)>) -> bool {
         let Some(raw) = state.raw.as_ref() else {
             return false;
         };
-        let Some(frame) = crate::webm_frame_macos::pixel_buffer_from_i420(
-            raw.width, raw.height, &raw.y, &raw.u, &raw.v, max_size,
-        ) else {
+        let Some((out_w, out_h)) =
+            crate::webm_frame_macos::output_size(raw.width, raw.height, max_size)
+        else {
             return false;
         };
-        state.cached = Some(frame);
+        let slot = state.pixel_pool_i % 2;
+        state.pixel_pool_i = state.pixel_pool_i.wrapping_add(1);
+        let reuse = state.pixel_pool[slot]
+            .as_ref()
+            .is_some_and(|buf| buf.get_width() as u32 == out_w && buf.get_height() as u32 == out_h);
+        if !reuse {
+            let Some(buffer) = crate::webm_frame_macos::create_pixel_buffer(out_w, out_h) else {
+                return false;
+            };
+            state.pixel_pool[slot] = Some(buffer);
+        }
+        let Some(buffer) = state.pixel_pool[slot].as_ref() else {
+            return false;
+        };
+        if crate::webm_frame_macos::fill_pixel_buffer_from_i420(
+            buffer, raw.width, raw.height, &raw.y, &raw.u, &raw.v, max_size,
+        )
+        .is_none()
+        {
+            return false;
+        }
+        state.cached = Some(buffer.clone());
         return true;
     }
     #[cfg(not(any(windows, target_os = "macos")))]
@@ -669,8 +712,8 @@ mod tests {
     #[test]
     fn local_file_path_rejects_unc() {
         assert!(local_file_path("file:///tmp/a.webm").is_some());
+        assert!(local_file_path("/tmp/a.webm").is_some());
         assert!(local_file_path("file:////server/share/a.webm").is_none());
         assert!(local_file_path("https://cdn.example/a.webm").is_none());
-        assert!(local_file_path("C:\\\\temp\\\\a.webm").is_none());
     }
 }

@@ -137,14 +137,18 @@ struct AvFoundationPlayer {
 
 impl PlayerImpl {
     pub fn open(url: &str, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
-        let inner = if crate::webm_player::is_webm_source(url) {
-            PlayerBackend::Webm(Box::new(crate::webm_player::WebmPlayerImpl::open(
-                url, max_size,
-            )?))
-        } else {
-            PlayerBackend::AvFoundation(AvFoundationPlayer::open(url, max_size)?)
-        };
-        Ok(Self { inner })
+        if crate::webm_player::is_webm_source(url) {
+            return Err(PlayerError::Open);
+        }
+        Ok(Self {
+            inner: PlayerBackend::AvFoundation(AvFoundationPlayer::open(url, max_size)?),
+        })
+    }
+
+    pub fn from_webm(player: crate::webm_player::WebmPlayerImpl) -> Self {
+        Self {
+            inner: PlayerBackend::Webm(Box::new(player)),
+        }
     }
 
     pub fn from_webm(player: crate::webm_player::WebmPlayerImpl) -> Self {

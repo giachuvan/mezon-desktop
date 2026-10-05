@@ -8,7 +8,6 @@ use core_video::pixel_buffer::{
 };
 use objc::runtime::{Object, YES};
 use objc::{class, msg_send, sel, sel_impl};
-use oxideav_vp8::decoder::Vp8DecodedFrame;
 
 const LOCK_READ_WRITE: u64 = 0;
 
@@ -28,20 +27,6 @@ unsafe extern "C" {
     fn CVPixelBufferGetBytesPerRowOfPlane(buffer: CVPixelBufferRef, plane: usize) -> usize;
 }
 
-pub fn pixel_buffer_from_vp8(
-    decoded: &Vp8DecodedFrame,
-    max_size: Option<(u32, u32)>,
-) -> Option<CVPixelBuffer> {
-    pixel_buffer_from_i420(
-        decoded.width,
-        decoded.height,
-        &decoded.y,
-        &decoded.u,
-        &decoded.v,
-        max_size,
-    )
-}
-
 pub fn pixel_buffer_from_i420(
     width: u32,
     height: u32,
@@ -50,21 +35,39 @@ pub fn pixel_buffer_from_i420(
     v: &[u8],
     max_size: Option<(u32, u32)>,
 ) -> Option<CVPixelBuffer> {
-    let (width, height, y, u, v) = scaled_i420(width, height, y, u, v, max_size)?;
-    let buffer = create_pixel_buffer(width, height)?;
-    fill_biplanar_full_from_limited(&buffer, width, height, &y, &u, &v)?;
+    let (out_w, out_h) = output_size(width, height, max_size)?;
+    let buffer = create_pixel_buffer(out_w, out_h)?;
+    fill_pixel_buffer_from_i420(&buffer, width, height, y, u, v, max_size)?;
     Some(buffer)
 }
 
-fn scaled_i420(
+pub fn fill_pixel_buffer_from_i420(
+    buffer: &CVPixelBuffer,
     width: u32,
     height: u32,
     y: &[u8],
     u: &[u8],
     v: &[u8],
     max_size: Option<(u32, u32)>,
-) -> Option<(u32, u32, Vec<u8>, Vec<u8>, Vec<u8>)> {
-    let (out_w, out_h) = match max_size {
+) -> Option<()> {
+    let (out_w, out_h) = output_size(width, height, max_size)?;
+    if buffer.get_width() as u32 != out_w || buffer.get_height() as u32 != out_h {
+        return None;
+    }
+    if out_w == width && out_h == height {
+        return fill_biplanar_full_from_limited(buffer, width, height, y, u, v);
+    }
+    let bgra = crate::frame_util::i420_to_bgra(width, height, y, u, v)?;
+    let scaled = scale_bgra(&bgra, width, height, out_w, out_h)?;
+    let (_, _, sy, su, sv) = i420_limited_from_bgra(out_w, out_h, &scaled)?;
+    fill_biplanar_full_from_limited(buffer, out_w, out_h, &sy, &su, &sv)
+}
+
+pub fn output_size(width: u32, height: u32, max_size: Option<(u32, u32)>) -> Option<(u32, u32)> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(match max_size {
         Some((max_w, max_h)) if max_w > 0 && max_h > 0 => {
             if width <= max_w && height <= max_h {
                 (width, height)
@@ -77,16 +80,10 @@ fn scaled_i420(
             }
         }
         _ => (width, height),
-    };
-    if out_w == width && out_h == height {
-        return Some((width, height, y.to_vec(), u.to_vec(), v.to_vec()));
-    }
-    let bgra = crate::frame_util::i420_to_bgra(width, height, y, u, v)?;
-    let scaled = scale_bgra(&bgra, width, height, out_w, out_h)?;
-    i420_limited_from_bgra(out_w, out_h, &scaled)
+    })
 }
 
-fn create_pixel_buffer(width: u32, height: u32) -> Option<CVPixelBuffer> {
+pub fn create_pixel_buffer(width: u32, height: u32) -> Option<CVPixelBuffer> {
     let attributes = pixel_buffer_attributes()?;
     let mut buffer: CVPixelBufferRef = ptr::null_mut();
     let status = unsafe {
